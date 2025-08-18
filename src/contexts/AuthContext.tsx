@@ -15,7 +15,7 @@ import {
   updateProfile,
   User as FirebaseUser,
 } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import type { Role, Usuario } from "../types";
 
 type AuthContextType = {
@@ -34,31 +34,45 @@ const AuthContext = createContext<AuthContextType>({
   signOut: async () => {},
 });
 
+/** Monta um objeto sem campos undefined (Firestore não aceita undefined). */
+function clean(obj: Record<string, any>) {
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
 async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
   const ref = doc(db, "users", fbUser.uid);
   const snap = await getDoc(ref);
 
   if (!snap.exists()) {
-    const novo: Partial<Usuario> = {
-      uid: fbUser.uid as any,
-      email: fbUser.email || undefined,
-      nome: fbUser.displayName || undefined,
-      // coerente com seu tipo Role/Usuario atual
-      role: (("analista" as unknown) as Role),
-      createdAt: new Date() as any,
-      updatedAt: new Date() as any,
-    };
+    // Inclua apenas campos definidos; use serverTimestamp para datas
+    const novo = clean({
+      uid: fbUser.uid,
+      email: fbUser.email ?? null,        // null é aceito, undefined não
+      nome: fbUser.displayName ?? undefined,
+      role: ("analista" as unknown) as Role,
+      isActive: true,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
     await setDoc(ref, novo, { merge: true });
-    return novo as Usuario;
+
+    // leia o que foi salvo (garante retorno consistente)
+    const created = await getDoc(ref);
+    return { uid: fbUser.uid, ...(created.data() as any) } as Usuario;
   }
 
-  const data = snap.data() as Partial<Usuario>;
+  const data = snap.data() as any;
+  // Na leitura, tudo bem ter campos ausentes; complete com o que vier do auth
   return {
     uid: fbUser.uid as any,
-    email: fbUser.email || data.email,
-    nome: fbUser.displayName || (data as any).nome,
-    role: (data as any).role as Role,
-    ...(data as any),
+    email: fbUser.email ?? data?.email ?? null,
+    nome: fbUser.displayName ?? data?.nome ?? null,
+    role: (data?.role as Role) ?? (("analista" as unknown) as Role),
+    ...data,
   } as Usuario;
 }
 
@@ -66,7 +80,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<Usuario | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Bootstrap da sessão: somente este listener decide quando loading=false
+  // Somente o onAuthStateChanged decide quando loading=false
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fb) => {
       try {
@@ -86,11 +100,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsub();
   }, []);
 
+  // Importante: não dar loading=false aqui; deixamos para o onAuthStateChanged
   const signIn = async (email: string, password: string) => {
     setLoading(true);
     try {
       await signInWithEmailAndPassword(auth, email, password);
-      // Não fazer setLoading(false) aqui; o onAuthStateChanged cuidará disso
     } catch (err) {
       setLoading(false);
       throw err;
@@ -108,7 +122,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           /* ignore */
         }
       }
-      // Não chamar readOrCreateUserDoc aqui; deixamos para o onAuthStateChanged
+      // readOrCreateUserDoc será chamado pelo onAuthStateChanged
     } catch (err) {
       setLoading(false);
       throw err;
@@ -119,7 +133,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setLoading(true);
     try {
       await fbSignOut(auth);
-      // onAuthStateChanged colocará user=null e loading=false
     } catch (err) {
       setLoading(false);
       throw err;
@@ -134,5 +147,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
+// Hook padrão
 export const useAuth = () => useContext(AuthContext);
 export default AuthProvider;
