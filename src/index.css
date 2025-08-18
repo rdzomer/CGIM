@@ -1,0 +1,27 @@
+/* Global styles básicos (independe de build do Tailwind) */
+
+:root {
+  --bg: #f8fafc;
+  --text: #0f172a;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Noto Sans,
+    Ubuntu, Cantarell, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+/* Print-friendly para o Relatório */
+@media print {
+  @page { margin: 12mm; }
+  body { background: #fff; }
+  .no-print { display: none !important; }
+  .print\:border-0 { border: 0 !important; }
+  .print\:shadow-none { box-shadow: none !important; }
+}

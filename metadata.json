@@ -1,0 +1,6 @@
+{
+  "name": "CGIM - Gestão de Pleitos",
+  "description": "A comprehensive web application to manage, analyze, and document tariff change requests for the Brazilian government's General Coordination of Industries (CGIM). The system streamlines the workflow from meeting agenda intake to the generation of technical subsidy documents.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}
