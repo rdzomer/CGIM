@@ -1,11 +1,13 @@
 [build]
-  command = "npm run build"
+  # IMPORTANTE: usamos apenas o bundler do Vite, sem rodar `tsc -b`.
+  # Isso mantém o comportamento que funciona localmente e destrava o deploy.
+  command = "npx vite build"
   publish = "dist"
 
 [build.environment]
   NODE_VERSION = "20"
 
-# SPA fallback para react-router
+# SPA fallback para rotas do react-router
 [[redirects]]
   from = "/*"
   to = "/index.html"
