@@ -43,8 +43,7 @@ async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
       uid: fbUser.uid as any,
       email: fbUser.email || undefined,
       nome: fbUser.displayName || undefined,
-      // se tiver enum Role no seu projeto, isso aqui fica coerente
-      // senão, o tipo aceita string (adjust no seu types se necessário)
+      // coerente com seu tipo Role/Usuario atual
       role: (("analista" as unknown) as Role),
       createdAt: new Date() as any,
       updatedAt: new Date() as any,
@@ -67,13 +66,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<Usuario | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Bootstrap da sessão: somente este listener decide quando loading=false
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fb) => {
       try {
         if (!fb) {
           setUser(null);
-          setLoading(false);
-          return;
+          return; // setLoading(false) acontece no finally
         }
         const u = await readOrCreateUserDoc(fb);
         setUser(u);
@@ -89,25 +88,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signIn = async (email: string, password: string) => {
     setLoading(true);
-    await signInWithEmailAndPassword(auth, email, password);
-    // onAuthStateChanged atualizará o estado
-    setLoading(false);
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+      // Não fazer setLoading(false) aqui; o onAuthStateChanged cuidará disso
+    } catch (err) {
+      setLoading(false);
+      throw err;
+    }
   };
 
   const signUp = async (email: string, password: string, displayName?: string) => {
     setLoading(true);
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
-    if (displayName) {
-      try { await updateProfile(cred.user, { displayName }); } catch {}
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, password);
+      if (displayName) {
+        try {
+          await updateProfile(cred.user, { displayName });
+        } catch {
+          /* ignore */
+        }
+      }
+      // Não chamar readOrCreateUserDoc aqui; deixamos para o onAuthStateChanged
+    } catch (err) {
+      setLoading(false);
+      throw err;
     }
-    await readOrCreateUserDoc(cred.user);
-    setLoading(false);
   };
 
   const signOut = async () => {
     setLoading(true);
-    await fbSignOut(auth);
-    setLoading(false);
+    try {
+      await fbSignOut(auth);
+      // onAuthStateChanged colocará user=null e loading=false
+    } catch (err) {
+      setLoading(false);
+      throw err;
+    }
   };
 
   const value = useMemo(
@@ -118,8 +134,5 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
 
-// ✅ hook que muitas páginas importam
 export const useAuth = () => useContext(AuthContext);
-
-// ✅ exporta também default para evitar qualquer variação de import
 export default AuthProvider;
