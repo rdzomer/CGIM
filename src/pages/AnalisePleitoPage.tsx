@@ -301,7 +301,7 @@ const AnalisePleitoPage: React.FC = () => {
     return fichaPairsFull.filter(([k]) => !omit.has(k));
   }, [fichaPairsFull, pedido._matchedKeys]);
 
-  async function salvar(statusForcado?: "em_andamento" | "concluido") {
+  async function salvar(statusForcado?: "em_analise" | "concluido") {
     if (!atr) return;
     setSalvando(true);
     try {
@@ -316,7 +316,7 @@ const AnalisePleitoPage: React.FC = () => {
         updatedAt: serverTimestamp(),
       };
       if (statusForcado) payload.status = statusForcado;
-      else if (!atr.status || atr.status === "novo") payload.status = "em_andamento";
+      else if (!atr.status || atr.status === "novo") payload.status = "em_analise";
 
       await updateDoc(doc(db, "atribuicoes", atr.id), payload);
       toast.success(statusForcado === "concluido" ? "Análise concluída." : "Análise salva.");
@@ -426,7 +426,7 @@ const AnalisePleitoPage: React.FC = () => {
             <button
               className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
               disabled={salvando}
-              onClick={() => salvar("em_andamento")}
+              onClick={() => salvar("em_analise")}
             >
               Salvar análise
             </button>
@@ -547,7 +547,7 @@ const AnalisePleitoPage: React.FC = () => {
           <div>
             <label className="block text-sm text-slate-600 mb-1">Resumo</label>
             <textarea
-              className="w-full border rounded-lg p-2 min-h-[100px]"
+              className="w-full border rounded-lg p-2 min-h-[220px] resize-y"
               value={form.resumo || ""}
               onChange={(e) => setForm((f) => ({ ...f, resumo: e.target.value }))}
             />
@@ -555,7 +555,7 @@ const AnalisePleitoPage: React.FC = () => {
           <div>
             <label className="block text-sm text-slate-600 mb-1">Aspectos de Comércio Exterior</label>
             <textarea
-              className="w-full border rounded-lg p-2 min-h-[100px]"
+              className="w-full border rounded-lg p-2 min-h-[220px] resize-y"
               value={form.comercio || ""}
               onChange={(e) => setForm((f) => ({ ...f, comercio: e.target.value }))}
             />
@@ -563,7 +563,7 @@ const AnalisePleitoPage: React.FC = () => {
           <div>
             <label className="block text-sm text-slate-600 mb-1">Análise Técnica</label>
             <textarea
-              className="w-full border rounded-lg p-2 min-h-[100px]"
+              className="w-full border rounded-lg p-2 min-h-[220px] resize-y"
               value={form.tecnica || ""}
               onChange={(e) => setForm((f) => ({ ...f, tecnica: e.target.value }))}
             />
@@ -571,7 +571,7 @@ const AnalisePleitoPage: React.FC = () => {
           <div>
             <label className="block text-sm text-slate-600 mb-1">Sugestão</label>
             <textarea
-              className="w-full border rounded-lg p-2 min-h-[100px]"
+              className="w-full border rounded-lg p-2 min-h-[220px] resize-y"
               value={form.sugestao || ""}
               onChange={(e) => setForm((f) => ({ ...f, sugestao: e.target.value }))}
             />
@@ -581,7 +581,7 @@ const AnalisePleitoPage: React.FC = () => {
             <button
               className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
               disabled={salvando}
-              onClick={() => salvar("em_andamento")}
+              onClick={() => salvar("em_analise")}
             >
               Salvar análise
             </button>
@@ -600,3 +600,4 @@ const AnalisePleitoPage: React.FC = () => {
 };
 
 export default AnalisePleitoPage;
+
