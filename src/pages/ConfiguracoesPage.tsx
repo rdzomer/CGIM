@@ -50,7 +50,7 @@ const svcImportarPlanilha =
   (ncmsService.importarPlanilhaNcms as (file: File) => Promise<any>);
 
 const svcContarNcms =
-  // tenta o contador mais novo, se existir
+  // tenta contador, se existir
   // @ts-expect-error
   (ncmsService.getNcmCountCgim as (prefix?: string) => Promise<number>) ??
   // @ts-expect-error
@@ -71,8 +71,6 @@ async function svcListarNcms(
   const { limit, prefix, cursor, page } = opts;
 
   // 1) listarNcms({ limit, prefix, page })
-  // 2) listarNcmsPaginado(...)  ← assinatura pode variar entre (limit, cursor) ou (prefix, limit, cursor)
-  // 3) listarNcmsPorPagina(prefix, page, limit)
   if ((ncmsService as any).listarNcms) {
     const res = await (ncmsService as any).listarNcms({ limit, prefix, page });
     return {
@@ -82,19 +80,20 @@ async function svcListarNcms(
       total: res?.total,
     };
   }
+
+  // 2) listarNcmsPaginado (assinaturas variam)
   if ((ncmsService as any).listarNcmsPaginado) {
     const fn = (ncmsService as any).listarNcmsPaginado;
     try {
-      const arity = typeof fn === 'function' ? fn.length : 0;
+      const arity = typeof fn === "function" ? fn.length : 0;
       let res;
       if (arity >= 3) {
-        // assume (prefix, limit, cursor)
+        // (prefix, limit, cursor)
         res = await fn(prefix || "", limit, cursor);
       } else if (arity === 2) {
-        // assume (limit, cursor)
+        // (limit, cursor)
         res = await fn(limit, cursor);
       } else {
-        // fallback: tenta (limit)
         res = await fn(limit);
       }
       return {
@@ -104,10 +103,11 @@ async function svcListarNcms(
         total: res?.total,
       };
     } catch (e) {
-      // se falhar, ignora e tenta o próximo
       console.error("listarNcmsPaginado (compat) falhou:", e);
     }
   }
+
+  // 3) listarNcmsPorPagina(prefix, page, limit)
   if ((ncmsService as any).listarNcmsPorPagina) {
     const res = await (ncmsService as any).listarNcmsPorPagina(prefix || "", page ?? 1, limit);
     return {
@@ -117,6 +117,7 @@ async function svcListarNcms(
       total: res?.total,
     };
   }
+
   return { items: [] };
 }
 
@@ -329,7 +330,7 @@ const ConfiguracoesPage: React.FC = () => {
             onChange={onChangePrefixo}
           />
 
-          <select
+        <select
             value={pageSize}
             onChange={(e) => setPageSize(Number(e.target.value))}
             className="px-3 py-2 rounded border"
@@ -397,5 +398,17 @@ const ConfiguracoesPage: React.FC = () => {
             ) : (
               linhasFiltradas.map((l) => (
                 <tr key={l.ncm} className="border-t">
-                  <td className="px-4 py-3 font-mono">{formatNcm(l.ncm) || "
+                  <td className="px-4 py-3 font-mono">{formatNcm(l.ncm) || "—"}</td>
+                  <td className="px-4 py-3">{l.setor || "—"}</td>
+                  <td className="px-4 py-3">{l.produto || "—"}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
 
+export default ConfiguracoesPage;
