@@ -53,29 +53,13 @@ type PageResult = {
   total?: number;
 };
 
-// *** AQUI ESTÁ A CORREÇÃO ***
-// Faz a chamada ao service detectando a ASSINATURA certa para evitar passar prefix no lugar do limit.
+// *** Mais rápido: prioriza listarNcmsPaginado e não bloqueia na contagem ***
 async function svcListarNcms(
   opts: { limit: number; prefix?: string; cursor?: any; page?: number }
 ): Promise<PageResult> {
   const { limit, prefix, cursor, page } = opts;
 
-  // 1) listarNcms({ limit, prefix, page })
-  if ((ncmsService as any).listarNcms) {
-    try {
-      const res = await (ncmsService as any).listarNcms({ limit, prefix, page, cursor });
-      return {
-        items: res?.items || res?.itens || [],
-        nextCursor: res?.nextCursor,
-        page: res?.page,
-        total: res?.total,
-      };
-    } catch (e) {
-      console.warn("listarNcms falhou, tentando outras assinaturas…", e);
-    }
-  }
-
-  // 2) listarNcmsPaginado — pode ter várias assinaturas
+  // 1) TENTAR listarNcmsPaginado — geralmente é a versão mais eficiente
   if ((ncmsService as any).listarNcmsPaginado) {
     const fn = (ncmsService as any).listarNcmsPaginado;
     try {
@@ -83,22 +67,20 @@ async function svcListarNcms(
       let res: any;
 
       if (arity >= 3) {
-        // assinatura mais comum no seu repo legacy
-        // (prefix, limit, cursor)
+        // assinatura (prefix, limit, cursor)
         res = await fn(prefix || "", limit, cursor);
       } else if (arity === 2) {
-        // (limit, cursor)
+        // assinatura (limit, cursor)
         res = await fn(limit, cursor);
       } else if (arity === 1) {
         // (limit) ou (options)
-        // tenta primeiro objeto de opções
         try {
           res = await fn({ limit, prefix, cursor });
         } catch {
           res = await fn(limit);
         }
       } else {
-        // arity 0 (param único com default) — tenta objeto
+        // arity 0 → opções por objeto
         res = await fn({ limit, prefix, cursor });
       }
 
@@ -109,7 +91,22 @@ async function svcListarNcms(
         total: res?.total,
       };
     } catch (e) {
-      console.warn("listarNcmsPaginado (compat) falhou, tentando fallback…", e);
+      console.warn("listarNcmsPaginado falhou, tentando outras assinaturas…", e);
+    }
+  }
+
+  // 2) listarNcms({ limit, prefix, page })
+  if ((ncmsService as any).listarNcms) {
+    try {
+      const res = await (ncmsService as any).listarNcms({ limit, prefix, page, cursor });
+      return {
+        items: res?.items || res?.itens || [],
+        nextCursor: res?.nextCursor,
+        page: res?.page,
+        total: res?.total,
+      };
+    } catch (e) {
+      console.warn("listarNcms falhou, tentando fallback…", e);
     }
   }
 
@@ -145,15 +142,13 @@ const ConfiguracoesPage: React.FC = () => {
   const linhasFiltradas = useMemo(() => linhas, [linhas]);
   const qtdRender = useMemo(() => linhasFiltradas.length, [linhasFiltradas]);
 
-  // Primeira carga
+  // Primeira carga: lista primeiro, conta em paralelo (não bloqueia a UI)
   useEffect(() => {
     (async () => {
       try {
         setCarregando(true);
-        if (svcContarNcms) {
-          const t = await svcContarNcms(prefixo ? onlyDigits(prefixo) : "");
-          setTotal(t || 0);
-        }
+
+        // FAZ A LISTA (rápido na maioria dos casos)
         const res = await svcListarNcms({
           limit: pageSize,
           prefix: onlyDigits(prefixo) || undefined,
@@ -167,11 +162,25 @@ const ConfiguracoesPage: React.FC = () => {
           nextCursorRef.current = undefined;
           pageNumberRef.current = res.page ?? 1;
         }
+        // Se a API já trouxe total, usa; senão, mantemos o antigo até a contagem chegar
+        if (typeof res.total === "number") setTotal(res.total);
+
+        setCarregando(false);
+
+        // EM PARALELO: atualiza o total sem travar a tela
+        if (svcContarNcms) {
+          try {
+            const t = await svcContarNcms(prefixo ? onlyDigits(prefixo) : "");
+            setTotal(t || 0);
+          } catch (e) {
+            // não quebra a UI se a contagem falhar
+            console.warn("Falha ao obter total:", e);
+          }
+        }
       } catch (err) {
         console.error(err);
-        toast.error("Falha ao carregar NCMs.");
-      } finally {
         setCarregando(false);
+        toast.error("Falha ao carregar NCMs.");
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -185,21 +194,35 @@ const ConfiguracoesPage: React.FC = () => {
       const res = await svcImportarPlanilha(file);
       const { inseridos, atualizados, totalLidas } = res || {};
 
-      if (svcContarNcms) {
-        const t = await svcContarNcms(prefixo ? onlyDigits(prefixo) : "");
-        setTotal(t || 0);
-      }
-
       toast.success(
         `Planilha processada. Lidas: ${totalLidas ?? "?"} · Inseridos: ${inseridos ?? "?"} · Atualizados: ${atualizados ?? "?"}`
       );
 
-      await recarregar(true);
+      // Recarrega lista rapidamente
+      const list = await svcListarNcms({
+        limit: pageSize,
+        prefix: onlyDigits(prefixo) || undefined,
+        page: 1,
+      });
+      setLinhas(list.items ?? []);
+      nextCursorRef.current = list.nextCursor;
+      pageNumberRef.current = list.page ?? 1;
+
+      setCarregando(false);
+
+      // Conta em paralelo
+      if (svcContarNcms) {
+        try {
+          const t = await svcContarNcms(prefixo ? onlyDigits(prefixo) : "");
+          setTotal(t || 0);
+        } catch (e) {
+          console.warn("Falha ao contar após importação:", e);
+        }
+      }
     } catch (e) {
       console.error(e);
-      toast.error("Falha ao importar a planilha de NCMs.");
-    } finally {
       setCarregando(false);
+      toast.error("Falha ao importar a planilha de NCMs.");
     }
   };
 
@@ -207,6 +230,7 @@ const ConfiguracoesPage: React.FC = () => {
     setPrefixo(e.target.value || "");
   };
 
+  // Recarrega a página atual (lista primeiro, total depois)
   const recarregar = async (resetPagina = false) => {
     try {
       setCarregando(true);
@@ -235,11 +259,24 @@ const ConfiguracoesPage: React.FC = () => {
         nextCursorRef.current = undefined;
         pageNumberRef.current = res.page ?? 1;
       }
+
+      if (typeof res.total === "number") setTotal(res.total);
+
+      setCarregando(false);
+
+      // Conta em paralelo (não bloqueia)
+      if (svcContarNcms) {
+        try {
+          const t = await svcContarNcms(prefixo ? onlyDigits(prefixo) : "");
+          setTotal(t || 0);
+        } catch (e) {
+          console.warn("Falha ao contar no recarregar:", e);
+        }
+      }
     } catch (err) {
       console.error(err);
-      toast.error("Erro ao recarregar NCMs.");
-    } finally {
       setCarregando(false);
+      toast.error("Erro ao recarregar NCMs.");
     }
   };
 
@@ -264,11 +301,12 @@ const ConfiguracoesPage: React.FC = () => {
         setLinhas(res.items ?? []);
         pageNumberRef.current = res.page ?? proxima;
       }
+      setCarregando(false);
+      // não reconta a cada página (evita custo)
     } catch (err) {
       console.error(err);
-      toast.error("Erro ao carregar próxima página.");
-    } finally {
       setCarregando(false);
+      toast.error("Erro ao carregar próxima página.");
     }
   };
 
@@ -283,15 +321,24 @@ const ConfiguracoesPage: React.FC = () => {
       setLinhas(res.items ?? []);
       nextCursorRef.current = res.nextCursor;
       pageNumberRef.current = res.page ?? 1;
+
+      if (typeof res.total === "number") setTotal(res.total);
+
+      setCarregando(false);
+
+      // Conta em paralelo
       if (svcContarNcms) {
-        const t = await svcContarNcms(prefixo ? onlyDigits(prefixo) : "");
-        setTotal(t || 0);
+        try {
+          const t = await svcContarNcms(prefixo ? onlyDigits(prefixo) : "");
+          setTotal(t || 0);
+        } catch (e) {
+          console.warn("Falha ao contar ao aplicar prefixo:", e);
+        }
       }
     } catch (err) {
       console.error(err);
-      toast.error("Erro ao filtrar por prefixo.");
-    } finally {
       setCarregando(false);
+      toast.error("Erro ao filtrar por prefixo.");
     }
   };
 
@@ -334,7 +381,7 @@ const ConfiguracoesPage: React.FC = () => {
             onChange={(e) => setPageSize(Number(e.target.value))}
             className="px-3 py-2 rounded border"
           >
-            {[25, 50, 100, 200].map((n) => (
+            {PAGE_SIZES.map((n) => (
               <option key={n} value={n}>
                 {n} / pág.
               </option>
