@@ -2,29 +2,17 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 
-// ⚠️ Importa o serviço em modo *namespace* para evitar crash
-// quando um export nominal não existir (ex.: 'contarNcms').
+// Importa o service em namespace para tolerar variações de exports
 import * as ncmsService from "../services/ncmsService";
 
-// Também usamos o mesmo helper do módulo da pauta para manter compatibilidade.
-// Se não existir no serviço, o componente continua funcionando sem o filtro.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-let getNcmSetCgim: undefined | (() => Promise<Set<string>>);
-try {
-  // tentativa de obter a função do serviço (compatível com PautaCatPage)
-  // @ts-expect-error: carregamento opcional
-  getNcmSetCgim = (ncmsService as any).getNcmSetCgim;
-} catch {
-  getNcmSetCgim = undefined;
-}
-
-// Tipos
+// Tipos mínimos usados na tabela
 type NcmLinha = {
   ncm: string;
   setor?: string;
   produto?: string;
 };
 
+// Helpers
 function onlyDigits(s: string | undefined | null): string {
   if (!s) return "";
   return String(s).replace(/\D+/g, "");
@@ -38,26 +26,26 @@ function formatNcm(ncm: string | undefined | null): string {
   return [p1, p2, p3].filter(Boolean).join(".");
 }
 
-// Serviços (mantidos como no projeto)
+// Services já existentes no seu projeto (mantidos)
 const svcImportarPlanilha =
-  // @ts-expect-error
+  // @ts-expect-error - pode existir com esse nome
   (ncmsService.importarNcmsPlanilha as (file: File) => Promise<{
     inseridos?: number;
     atualizados?: number;
     totalLidas?: number;
   }>) ??
-  // @ts-expect-error
+  // @ts-expect-error - fallback legado
   (ncmsService.importarPlanilhaNcms as (file: File) => Promise<any>);
 
 const svcContarNcms =
-  // tenta contador, se existir
-  // @ts-expect-error
+  // @ts-expect-error - preferir contador mais novo
   (ncmsService.getNcmCountCgim as (prefix?: string) => Promise<number>) ??
-  // @ts-expect-error
+  // @ts-expect-error - legado
   (ncmsService.contarNcms as (prefix?: string) => Promise<number>) ??
-  // @ts-expect-error
+  // @ts-expect-error - legado
   (ncmsService.totalNcms as () => Promise<number>);
 
+// Resultado padronizado de listagem
 type PageResult = {
   items: NcmLinha[];
   nextCursor?: any;
@@ -65,6 +53,8 @@ type PageResult = {
   total?: number;
 };
 
+// *** AQUI ESTÁ A CORREÇÃO ***
+// Faz a chamada ao service detectando a ASSINATURA certa para evitar passar prefix no lugar do limit.
 async function svcListarNcms(
   opts: { limit: number; prefix?: string; cursor?: any; page?: number }
 ): Promise<PageResult> {
@@ -72,30 +62,8 @@ async function svcListarNcms(
 
   // 1) listarNcms({ limit, prefix, page })
   if ((ncmsService as any).listarNcms) {
-    const res = await (ncmsService as any).listarNcms({ limit, prefix, page });
-    return {
-      items: res?.items || [],
-      nextCursor: res?.nextCursor,
-      page: res?.page,
-      total: res?.total,
-    };
-  }
-
-  // 2) listarNcmsPaginado (assinaturas variam)
-  if ((ncmsService as any).listarNcmsPaginado) {
-    const fn = (ncmsService as any).listarNcmsPaginado;
     try {
-      const arity = typeof fn === "function" ? fn.length : 0;
-      let res;
-      if (arity >= 3) {
-        // (prefix, limit, cursor)
-        res = await fn(prefix || "", limit, cursor);
-      } else if (arity === 2) {
-        // (limit, cursor)
-        res = await fn(limit, cursor);
-      } else {
-        res = await fn(limit);
-      }
+      const res = await (ncmsService as any).listarNcms({ limit, prefix, page, cursor });
       return {
         items: res?.items || res?.itens || [],
         nextCursor: res?.nextCursor,
@@ -103,7 +71,45 @@ async function svcListarNcms(
         total: res?.total,
       };
     } catch (e) {
-      console.error("listarNcmsPaginado (compat) falhou:", e);
+      console.warn("listarNcms falhou, tentando outras assinaturas…", e);
+    }
+  }
+
+  // 2) listarNcmsPaginado — pode ter várias assinaturas
+  if ((ncmsService as any).listarNcmsPaginado) {
+    const fn = (ncmsService as any).listarNcmsPaginado;
+    try {
+      const arity = typeof fn === "function" ? fn.length : 0;
+      let res: any;
+
+      if (arity >= 3) {
+        // assinatura mais comum no seu repo legacy
+        // (prefix, limit, cursor)
+        res = await fn(prefix || "", limit, cursor);
+      } else if (arity === 2) {
+        // (limit, cursor)
+        res = await fn(limit, cursor);
+      } else if (arity === 1) {
+        // (limit) ou (options)
+        // tenta primeiro objeto de opções
+        try {
+          res = await fn({ limit, prefix, cursor });
+        } catch {
+          res = await fn(limit);
+        }
+      } else {
+        // arity 0 (param único com default) — tenta objeto
+        res = await fn({ limit, prefix, cursor });
+      }
+
+      return {
+        items: res?.items || res?.itens || [],
+        nextCursor: res?.nextCursor,
+        page: res?.page,
+        total: res?.total,
+      };
+    } catch (e) {
+      console.warn("listarNcmsPaginado (compat) falhou, tentando fallback…", e);
     }
   }
 
@@ -111,13 +117,14 @@ async function svcListarNcms(
   if ((ncmsService as any).listarNcmsPorPagina) {
     const res = await (ncmsService as any).listarNcmsPorPagina(prefix || "", page ?? 1, limit);
     return {
-      items: res?.items || [],
+      items: res?.items || res?.itens || [],
       nextCursor: undefined,
       page: res?.page ?? page ?? 1,
       total: res?.total,
     };
   }
 
+  // Sem nada disponível
   return { items: [] };
 }
 
@@ -134,16 +141,11 @@ const ConfiguracoesPage: React.FC = () => {
   const nextCursorRef = useRef<any>(undefined);
   const pageNumberRef = useRef<number>(1);
 
-  // Exibe “Total atual no banco: … NCM(s)”
-  const totalFmt = useMemo(() => {
-    return new Intl.NumberFormat("pt-BR").format(total);
-  }, [total]);
-
-  // Sem filtro CGIM nesta página — aqui gerenciamos a base CGIM
+  const totalFmt = useMemo(() => new Intl.NumberFormat("pt-BR").format(total), [total]);
   const linhasFiltradas = useMemo(() => linhas, [linhas]);
   const qtdRender = useMemo(() => linhasFiltradas.length, [linhasFiltradas]);
 
-  // Carrega total + primeira página ao abrir
+  // Primeira carga
   useEffect(() => {
     (async () => {
       try {
@@ -165,7 +167,7 @@ const ConfiguracoesPage: React.FC = () => {
           nextCursorRef.current = undefined;
           pageNumberRef.current = res.page ?? 1;
         }
-      } catch (err: any) {
+      } catch (err) {
         console.error(err);
         toast.error("Falha ao carregar NCMs.");
       } finally {
@@ -175,8 +177,7 @@ const ConfiguracoesPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // -------- Handlers --------
-
+  // ===== Handlers =====
   const onImportar = async (file?: File | null) => {
     if (!file) return;
     try {
@@ -184,7 +185,6 @@ const ConfiguracoesPage: React.FC = () => {
       const res = await svcImportarPlanilha(file);
       const { inseridos, atualizados, totalLidas } = res || {};
 
-      // Atualiza o total no fim
       if (svcContarNcms) {
         const t = await svcContarNcms(prefixo ? onlyDigits(prefixo) : "");
         setTotal(t || 0);
@@ -194,9 +194,8 @@ const ConfiguracoesPage: React.FC = () => {
         `Planilha processada. Lidas: ${totalLidas ?? "?"} · Inseridos: ${inseridos ?? "?"} · Atualizados: ${atualizados ?? "?"}`
       );
 
-      // Recarrega a primeira página com o eventual filtro
       await recarregar(true);
-    } catch (e: any) {
+    } catch (e) {
       console.error(e);
       toast.error("Falha ao importar a planilha de NCMs.");
     } finally {
@@ -236,7 +235,7 @@ const ConfiguracoesPage: React.FC = () => {
         nextCursorRef.current = undefined;
         pageNumberRef.current = res.page ?? 1;
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
       toast.error("Erro ao recarregar NCMs.");
     } finally {
@@ -265,7 +264,7 @@ const ConfiguracoesPage: React.FC = () => {
         setLinhas(res.items ?? []);
         pageNumberRef.current = res.page ?? proxima;
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
       toast.error("Erro ao carregar próxima página.");
     } finally {
@@ -288,7 +287,7 @@ const ConfiguracoesPage: React.FC = () => {
         const t = await svcContarNcms(prefixo ? onlyDigits(prefixo) : "");
         setTotal(t || 0);
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error(err);
       toast.error("Erro ao filtrar por prefixo.");
     } finally {
@@ -330,12 +329,12 @@ const ConfiguracoesPage: React.FC = () => {
             onChange={onChangePrefixo}
           />
 
-        <select
+          <select
             value={pageSize}
             onChange={(e) => setPageSize(Number(e.target.value))}
             className="px-3 py-2 rounded border"
           >
-            {PAGE_SIZES.map((n) => (
+            {[25, 50, 100, 200].map((n) => (
               <option key={n} value={n}>
                 {n} / pág.
               </option>
@@ -343,7 +342,7 @@ const ConfiguracoesPage: React.FC = () => {
           </select>
 
           <button
-            onClick={() => onApplyPrefixo()}
+            onClick={onApplyPrefixo}
             className="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300"
             disabled={carregando}
           >
@@ -369,9 +368,7 @@ const ConfiguracoesPage: React.FC = () => {
             Limpar filtro
           </button>
 
-          {carregando && (
-            <span className="text-sm text-gray-500">Carregando…</span>
-          )}
+          {carregando && <span className="text-sm text-gray-500">Carregando…</span>}
         </div>
         <div className="text-xs text-gray-500 mt-2">
           Exibindo <b>{qtdRender}</b> de <b>{linhas.length}</b> itens da página
