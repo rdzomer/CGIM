@@ -1,210 +1,243 @@
 // src/services/ncmsService.ts
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import { db } from "../firebase";
-import * as XLSX from "xlsx";
+// Serviço de NCMs pertencentes ao escopo da CGIM.
+// Coleção no Firestore: "ncmsCGIM"
+// Campos usuais por documento: { ncm: string, setor?: string, produto?: string, fonte?: string, ... }
+
 import {
+  getFirestore,
   collection,
   doc,
+  setDoc,
+  getDoc,
   getDocs,
-  getCountFromServer,
-  limit as qLimit,
-  orderBy,
   query,
+  orderBy,
+  limit as qLimit,
   startAfter,
   writeBatch,
-  where,
-  startAt,
-  endAt,
-  DocumentSnapshot,
-  Timestamp,
 } from "firebase/firestore";
 
-export type NcmCgim = {
-  ncm: string;            // "25010011"
-  setor?: string;
-  produto?: string;
-  agrupamento?: string;
-  descricao?: string;
-  fonte?: string;         // ex.: "20241011_NCMs-CGIM-DINTE.xlsx"
-  ativo?: boolean;
-  updatedAt?: number;     // epoch seconds
-};
+// Opcional (usado apenas em fallback de contagem; pode ser removido se preferir evitar quotas):
+import { getCountFromServer } from "firebase/firestore";
 
+// Se o projeto já utiliza a lib 'xlsx' no client:
+import * as XLSX from "xlsx";
+
+// =========================
+// Helpers
+// =========================
 const COLLECTION = "ncmsCGIM";
 
-// ---------------------------
-// Helpers
-// ---------------------------
-function onlyDigits(s: string | number | undefined | null): string {
-  const raw = (s ?? "").toString();
-  return raw.replace(/\D+/g, "");
-}
-function padNcm8(n: string): string {
-  const d = onlyDigits(n).slice(0, 8);
-  return d.padEnd(8, "0");
-}
-function normalizeBool(v: any): boolean {
-  if (typeof v === "boolean") return v;
-  if (typeof v === "number") return v !== 0;
-  if (typeof v === "string") return ["1", "true", "sim", "ativo", "yes"].includes(v.trim().toLowerCase());
-  return true;
-}
-
-// ---------------------------
-// Importação via Excel
-// ---------------------------
-export async function importarNcmsPlanilha(file: File, sourceName?: string): Promise<{ inseridos: number; atualizados: number; total: number; }> {
-  const buf = await file.arrayBuffer();
-  return importarNcmsArrayBuffer(buf, sourceName ?? file.name);
-}
-
-export async function importarNcmsArrayBuffer(buf: ArrayBuffer, sourceName = "upload.xlsx"): Promise<{ inseridos: number; atualizados: number; total: number; }> {
-  const wb = XLSX.read(buf, { type: "array" });
-  const sheetName = wb.SheetNames[0];
-  if (!sheetName) throw new Error("Não encontrei planilha no arquivo enviado.");
-  const ws = wb.Sheets[sheetName];
-
-  // Tenta ler como objetos pela primeira linha (cabeçalho).
-  const rows = XLSX.utils.sheet_to_json<Record<string, any>>(ws, { defval: "" });
-  if (!rows.length) throw new Error("Planilha vazia.");
-
-  // Mapeamento flexível de colunas
-  // Aceita cabeçalhos como: ncm, código ncm, codigo, produto, setor, agrupamento, descrição, ativo
-  const mapRow = (r: Record<string, any>): NcmCgim | null => {
-    // Descobrir possíveis nomes
-    const keys = Object.keys(r).reduce<Record<string, string>>((acc, k) => {
-      acc[k.toLowerCase().trim()] = k;
-      return acc;
-    }, {});
-
-    const ncmKey =
-      keys["ncm"] ??
-      keys["código ncm"] ??
-      keys["codigo ncm"] ??
-      keys["codigo"] ??
-      keys["código"] ??
-      keys["code"];
-
-    if (!ncmKey) return null;
-
-    const ncm = padNcm8(r[ncmKey]);
-
-    const setorKey = keys["setor"] ?? keys["setor/segmento"];
-    const produtoKey = keys["produto"] ?? keys["produto/mercadoria"];
-    const agrupKey = keys["agrupamento"] ?? keys["grupo"];
-    const descKey = keys["descricao"] ?? keys["descrição"] ?? keys["description"];
-    const ativoKey = keys["ativo"] ?? keys["status"];
-
-    const item: NcmCgim = {
-      ncm,
-      setor: r[setorKey] ?? "",
-      produto: r[produtoKey] ?? "",
-      agrupamento: r[agrupKey] ?? "",
-      descricao: r[descKey] ?? "",
-      ativo: normalizeBool(r[ativoKey]),
-      fonte: sourceName,
-      updatedAt: Math.floor(Date.now() / 1000),
-    };
-
-    return item;
-  };
-
-  const parsed = rows
-    .map(mapRow)
-    .filter((x): x is NcmCgim => !!x && !!x.ncm && x.ncm.length === 8);
-
-  if (!parsed.length) throw new Error("Não encontrei nenhuma NCM válida (8 dígitos) na planilha.");
-
-  // Gravação em batch (máx. ~400 por batch para folga)
-  let inseridos = 0;
-  let atualizados = 0;
-
-  const colRef = collection(db, COLLECTION);
-
-  for (let i = 0; i < parsed.length; i += 400) {
-    const slice = parsed.slice(i, i + 400);
-    const batch = writeBatch(db);
-
-    // Para diferenciar inserção x atualização, buscamos docs atuais do slice.
-    // (otimização: como o id é o próprio ncm, checamos por getDocs com where in blocos de 10)
-    for (const item of slice) {
-      const ref = doc(colRef, item.ncm);
-      // Não vamos ler cada doc individualmente aqui (latência alta).
-      // Em vez disso, marcamos todos como set(..., {merge:true}) e contamos como “inseridos” se updatedAt inexistente.
-      // Para efeito de contagem aproximada, consideraremos “atualizado” quando sobrescrever um doc existente
-      // ==> faremos um set com merge e usaremos a heurística: if (createdAt ausente) => atualizados++ depois via transform.
-      batch.set(ref, {
-        ...item,
-        ativo: item.ativo ?? true,
-        updatedAt: item.updatedAt,
-      }, { merge: true });
-    }
-
-    await batch.commit();
-
-    // Como não lemos antes, contamos todos como "atualizados".
-    // Para ter contagem exata, poderíamos fazer round-trip, mas não é necessário para o app.
-    atualizados += slice.length;
-  }
-
-  return { inseridos, atualizados, total: parsed.length };
-}
-
-// ---------------------------
-// Listagem/Paginação com filtro por prefixo
-// ---------------------------
-export type ListaNcmResult = {
-  itens: NcmCgim[];
-  nextCursor?: DocumentSnapshot;
+const onlyDigits = (s?: string) => (s ?? "").toString().replace(/\D+/g, "");
+const norm8 = (s?: string) => {
+  const d = onlyDigits(s).slice(0, 8);
+  return d.length === 8 ? d : "";
 };
 
+type NcmDoc = {
+  ncm: string;
+  setor?: string;
+  produto?: string;
+  fonte?: string;
+  [k: string]: any;
+};
+
+type Page<T> = {
+  items: T[];
+  nextCursor?: string; // último ncm da página
+};
+
+// =========================
+// CRUD básico / leitura
+// =========================
+
+/**
+ * Lista NCMs da coleção "ncmsCGIM" paginados, ordenados por "ncm".
+ * @param pageSize Tamanho da página (default 500)
+ * @param cursor   Último NCM da página anterior (use o valor retornado em nextCursor)
+ */
 export async function listarNcmsPaginado(
-  pageSize: number,
-  opts?: { prefix?: string; cursor?: DocumentSnapshot | null }
-): Promise<ListaNcmResult> {
-  const prefix = (opts?.prefix ?? "").trim();
-  const cursor = opts?.cursor ?? null;
+  pageSize = 500,
+  cursor?: string
+): Promise<Page<NcmDoc>> {
+  const db = getFirestore();
+  const col = collection(db, COLLECTION);
 
-  const colRef = collection(db, COLLECTION);
-  const ord = orderBy("ncm");
-  const lim = qLimit(pageSize);
-
-  let q;
-
-  if (prefix) {
-    // Busca por prefixo: >= prefix e <= prefix + \uf8ff
-    // (funciona bem com strings ordenadas lexicograficamente)
-    const start = startAt(prefix);
-    const end = endAt(prefix + "\uf8ff");
-    q = query(colRef, ord, start, end, lim);
-  } else {
-    q = cursor ? query(colRef, ord, startAfter(cursor), lim) : query(colRef, ord, lim);
+  let q = query(col, orderBy("ncm", "asc"), qLimit(pageSize));
+  if (cursor) {
+    // Como ordenamos por campo simples, podemos usar startAfter(cursorString)
+    q = query(col, orderBy("ncm", "asc"), startAfter(cursor), qLimit(pageSize));
   }
 
   const snap = await getDocs(q);
-  const itens = snap.docs.map((d) => d.data() as NcmCgim);
-  const nextCursor = snap.docs.length === pageSize ? snap.docs[snap.docs.length - 1] : undefined;
+  const items: NcmDoc[] = [];
+  let last: string | undefined;
 
-  return { itens, nextCursor };
+  snap.forEach((d) => {
+    const v = d.data() as any;
+    const n8 = norm8(v?.ncm ?? v?.codigo ?? v?.code);
+    if (!n8) return;
+    items.push({
+      ncm: n8,
+      setor: v?.setor,
+      produto: v?.produto,
+      fonte: v?.fonte,
+      ...v,
+    });
+    last = n8;
+  });
+
+  return { items, nextCursor: last };
 }
 
+/**
+ * Retorna um Set com todos os NCMs (8 dígitos) da CGIM.
+ * Implementado por varredura paginada para evitar agregações/quotas.
+ */
+export async function getNcmSetCgim(): Promise<Set<string>> {
+  const s = new Set<string>();
+  let cursor: string | undefined = undefined;
+
+  // Páginas grandes (1000) para reduzir round-trips.
+  const PAGE = 1000;
+
+  while (true) {
+    const { items, nextCursor } = await listarNcmsPaginado(PAGE, cursor);
+    if (!items.length) break;
+    for (const it of items) {
+      const n8 = norm8(it.ncm);
+      if (n8) s.add(n8);
+    }
+    if (!nextCursor) break;
+    cursor = nextCursor;
+  }
+  return s;
+}
+
+/**
+ * Conta NCMs CGIM.
+ * Tenta usar getCountFromServer (rápido), mas faz fallback para varredura se quota estourar.
+ */
 export async function getNcmCountCgim(): Promise<number> {
+  const db = getFirestore();
   try {
-    const c = collection(db, COLLECTION);
-    const snap = await getCountFromServer(c);
-    return snap.data().count;
+    const col = collection(db, COLLECTION);
+    const snap = await getCountFromServer(col);
+    return Number(snap.data().count || 0);
   } catch {
-    // Fallback: conta por paginação (mais lento, mas seguro em projetos sem agregações)
-    let total = 0;
-    let cursor: DocumentSnapshot | null | undefined = undefined;
-    // 200 por página para acelerar
-    // eslint-disable-next-line no-constant-condition
+    // Fallback: pagina e conta
+    let count = 0;
+    let cursor: string | undefined = undefined;
+    const PAGE = 2000;
     while (true) {
-      const { itens, nextCursor } = await listarNcmsPaginado(200, { cursor: cursor ?? null });
-      total += itens.length;
+      const { items, nextCursor } = await listarNcmsPaginado(PAGE, cursor);
+      if (!items.length) break;
+      count += items.length;
       if (!nextCursor) break;
       cursor = nextCursor;
     }
-    return total;
+    return count;
   }
 }
+
+/**
+ * Upsert (insere/atualiza) um NCM.
+ */
+export async function upsertNcm(ncm: string, data: Partial<NcmDoc> = {}): Promise<void> {
+  const db = getFirestore();
+  const n8 = norm8(ncm);
+  if (!n8) throw new Error("NCM inválido (precisa ter 8 dígitos).");
+  const ref = doc(db, COLLECTION, n8);
+  const prev = await getDoc(ref);
+  const merged = { ...(prev.exists() ? prev.data() : {}), ...data, ncm: n8 };
+  await setDoc(ref, merged, { merge: true });
+}
+
+/**
+ * Importa NCMs a partir de um ArrayBuffer de Excel.
+ * Regras adotadas:
+ *  - lê a primeira planilha;
+ *  - tenta detectar colunas por cabeçalho (NCM / Setor / Produto), mas
+ *    também funciona com posições fixas A (NCM), F (Setor), I (Produto);
+ *  - grava por batch (até 500 por commit).
+ */
+export async function importarNcmsArrayBuffer(buf: ArrayBuffer, sourceName = "planilha.xlsx") {
+  const wb = XLSX.read(buf, { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  if (!ws) throw new Error("Planilha sem abas.");
+
+  const json = XLSX.utils.sheet_to_json(ws, { header: 1 }) as any[][];
+  if (!json.length) throw new Error("Planilha vazia.");
+
+  // Detecta cabeçalhos
+  const header = (json[0] || []).map((h: any) => String(h ?? "").trim());
+  const idxOf = (labels: string[]) => {
+    const idx = header.findIndex((h) =>
+      labels.some((l) => h.toLowerCase() === l.toLowerCase())
+    );
+    return idx >= 0 ? idx : -1;
+  };
+
+  // Tentativas por cabeçalho:
+  let iNcm = idxOf(["NCM", "Código NCM", "Codigo NCM", "Código", "Codigo", "NCM 8"]);
+  let iSet = idxOf(["Setor", "Setores", "Area", "Área", "Segmento"]);
+  let iPro = idxOf(["Produto", "Descrição do Produto", "Descricao do Produto", "Produto/Descrição", "Descrição", "Descricao"]);
+
+  // Se não achou por cabeçalho, usa posições "A=0, F=5, I=8" como fallback
+  if (iNcm < 0) iNcm = 0;
+  if (iSet < 0) iSet = 5;
+  if (iPro < 0) iPro = 8;
+
+  const db = getFirestore();
+  const col = collection(db, COLLECTION);
+
+  let batch = writeBatch(db);
+  let pend = 0;
+  let total = 0;
+
+  const FLUSH = async () => {
+    if (pend > 0) {
+      await batch.commit();
+      batch = writeBatch(db);
+      pend = 0;
+    }
+  };
+
+  for (let r = 1; r < json.length; r++) {
+    const row = json[r] || [];
+    const n8 = norm8(row[iNcm]);
+    if (!n8) continue;
+
+    const setor = String(row[iSet] ?? "").trim();
+    const produto = String(row[iPro] ?? "").trim();
+
+    const ref = doc(col, n8);
+    batch.set(ref, { ncm: n8, setor, produto, fonte: sourceName }, { merge: true });
+    pend++;
+    total++;
+
+    if (pend >= 450) await FLUSH(); // margem antes de 500
+  }
+  await FLUSH();
+
+  return { total };
+}
+
+/** Lê arquivo Excel (do input `<input type="file">`) e importa. */
+export async function importarNcmsPlanilha(file: File) {
+  const buf = await file.arrayBuffer();
+  return importarNcmsArrayBuffer(buf, file.name);
+}
+
+// Aliases aceitos pela UI (evita quebrar imports antigos):
+export const importarPlanilhaDeNcms = importarNcmsPlanilha;
+export const importarExcelNcms = importarNcmsPlanilha;
+
+// =========================
+// Compatibilidade de nomes
+// =========================
+
+// Nome “correto” usado no app:
+export { getNcmSetCgim as getNcmSetCGIM }; // mesma função, alias com CGIM maiúsculo
+// Tolerância a typos que apareceram em logs (getNcmSetCgm sem "i"):
+export { getNcmSetCgim as getNcmSetCgm };
