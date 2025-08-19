@@ -1,11 +1,3 @@
-segue o arquivo **completo**, já ajustado para:
-
-* salvar com status **`"em_analise"`** (antes estava `"em_andamento"`);
-* `<textarea>` com **`min-h-[220px]`** e `resize-y`.
-
-Cole exatamente no caminho `src/pages/AnalisePleitoPage.tsx`.
-
-```tsx
 // src/pages/AnalisePleitoPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
@@ -124,25 +116,20 @@ function extractPedido(base: Record<string, any>): PedidoInfo {
     pais: pick(["país", "pais "]),
     paisPendente: pick(["país pendente", "pais pendente"]),
     prazoResposta: pick(["prazo para resposta", "prazo p/ resposta", "prazo p resposta"]),
-
     aliqAtual: pick(["alíquota aplicada", "aliquota aplicada", "alíquota atual", "aliquota atual", "aliq aplicada", "aliq atual"], fmtAliq),
     aliqPretendida: pick(["alíquota pretendida", "aliquota pretendida", "alíquota pleiteada", "aliquota pleiteada", "pretendida", "pleiteada"], fmtAliq),
     aliqSolicitada: pick(["alíquota solicitada", "aliquota solicitada"], fmtAliq),
     aliqZero: pick(["alíquota (pleito a 0%)", "aliquota (pleito a 0)", "pleito a 0"], fmtAliq),
     reducaoII: pick(["redução do ii", "redução do ii (%)", "reducao do ii", "reducao do ii (%)"]),
-
     quota: pick(["quota", "cota"]),
     unidadeQuota: pick(["unidade quota", "unidade cota"]),
     prazo: pick(["prazo "]),
     vigenciaFim: pick(["término vigência da medida em vigor", "termino vigencia da medida em vigor", "prazo da medida vigente", "vigência", "vigencia"]),
-
     ex: pick(["ex "]),
     exTarifario: pick(["ex-tarifário", "ex tarifario", "extarifario"]),
-
     notasTecnicas: pick(["notas técnicas", "notas tecnicas"]),
     posicaoCat: pick(["posição cat", "posicao cat"]),
     situacao: pick(["situação", "situacao"]),
-
     _matchedKeys: used,
   };
 }
@@ -253,48 +240,48 @@ const AnalisePleitoPage: React.FC = () => {
             ? pauta.secoes
             : [];
 
-          const alvoKey = (atrib.pleitoKey || `${atrib.ncm}|${atrib.produto}|${atrib.pleiteante}`).trim();
-          const ncmAlvo = onlyDigits(atrib.ncm || "");
-          const produtoAlvo = (atrib.produto || "").trim().toLowerCase();
-          const pleiteanteAlvo = (atrib.pleiteante || "").trim().toLowerCase();
+        const alvoKey = (atrib.pleitoKey || `${atrib.ncm}|${atrib.produto}|${atrib.pleiteante}`).trim();
+        const ncmAlvo = onlyDigits(atrib.ncm || "");
+        const produtoAlvo = (atrib.produto || "").trim().toLowerCase();
+        const pleiteanteAlvo = (atrib.pleiteante || "").trim().toLowerCase();
 
-          const best: Best = { score: -1, row: null };
-          for (const s of sections) {
-            const rows: any[] = Array.isArray(s?.rows) ? s.rows : [];
-            for (const r of rows) {
-              const sc = scoreRow(r, alvoKey, ncmAlvo, produtoAlvo, pleiteanteAlvo);
-              if (sc > best.score) {
-                best.score = sc;
-                best.row = r;
-              }
-              if (best.score >= 100) break;
+        const best: Best = { score: -1, row: null };
+        for (const s of sections) {
+          const rows: any[] = Array.isArray(s?.rows) ? s.rows : [];
+          for (const r of rows) {
+            const sc = scoreRow(r, alvoKey, ncmAlvo, produtoAlvo, pleiteanteAlvo);
+            if (sc > best.score) {
+              best.score = sc;
+              best.row = r;
             }
             if (best.score >= 100) break;
           }
-          line = best.row;
+          if (best.score >= 100) break;
         }
-
-        // Ficha amigável e extração do pedido
-        const fichaLocal: Record<string, string> = {};
-        const base = line || {};
-        for (const [k, val] of Object.entries(base)) {
-          const keyLower = k.toLowerCase();
-          if (HIDDEN_KEYS.test(keyLower)) continue;
-          if (["key", "pleitoKey"].includes(keyLower)) continue;
-          let display = String(val ?? "").trim();
-          if (!display) continue;
-          if (keyLower === "ncm") display = fmtNcm(display);
-          fichaLocal[friendlyLabel(k)] = display;
-        }
-        if (!fichaLocal["NCM"] && atrib.ncm) fichaLocal["NCM"] = fmtNcm(atrib.ncm);
-        if (!fichaLocal["Produto"] && atrib.produto) fichaLocal["Produto"] = atrib.produto;
-        if (!fichaLocal["Pleiteante"] && atrib.pleiteante) fichaLocal["Pleiteante"] = atrib.pleiteante;
-
-        setFicha(fichaLocal);
-        setPedido(extractPedido(base));
-      } finally {
-        setCarregando(false);
+        line = best.row;
       }
+
+      // Ficha amigável e extração do pedido
+      const fichaLocal: Record<string, string> = {};
+      const base = line || {};
+      for (const [k, val] of Object.entries(base)) {
+        const keyLower = k.toLowerCase();
+        if (HIDDEN_KEYS.test(keyLower)) continue;
+        if (["key", "pleitoKey"].includes(keyLower)) continue;
+        let display = String(val ?? "").trim();
+        if (!display) continue;
+        if (keyLower === "ncm") display = fmtNcm(display);
+        fichaLocal[friendlyLabel(k)] = display;
+      }
+      if (!fichaLocal["NCM"] && atrib.ncm) fichaLocal["NCM"] = fmtNcm(atrib.ncm);
+      if (!fichaLocal["Produto"] && atrib.produto) fichaLocal["Produto"] = atrib.produto;
+      if (!fichaLocal["Pleiteante"] && atrib.pleiteante) fichaLocal["Pleiteante"] = atrib.pleiteante;
+
+      setFicha(fichaLocal);
+      setPedido(extractPedido(base));
+    } finally {
+      setCarregando(false);
+    }
     })();
   }, [atrId, navigate, copyFrom]);
 
@@ -608,5 +595,5 @@ const AnalisePleitoPage: React.FC = () => {
 };
 
 export default AnalisePleitoPage;
-```
+
 
