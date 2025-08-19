@@ -1,30 +1,15 @@
 // src/pages/ConfiguracoesPage.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
-
-// ⚡️ Usaremos apenas consultas one-shot do Firestore (sem onSnapshot)
 import {
-  getFirestore,
-  collection,
-  query,
-  where,
-  orderBy,
-  limit as qlimit,
-  startAfter,
-  getDocs,
-  getCountFromServer,
-  QueryDocumentSnapshot,
-  DocumentData,
-} from "firebase/firestore";
+  listarNcmsPorPrefixoPaginado,
+  getNcmCountCgim,
+  importarNcmsPlanilha,
+  Page,
+  NcmDoc,
+} from "../services/ncmsService";
 
-// Mantemos o import do seu service só para a importação da planilha
-import * as ncmsService from "../services/ncmsService";
-
-type NcmLinha = {
-  ncm: string;
-  setor?: string;
-  produto?: string;
-};
+type NcmLinha = Pick<NcmDoc, "ncm" | "setor" | "produto">;
 
 function onlyDigits(s?: string | null) {
   return (s || "").replace(/\D+/g, "");
@@ -35,80 +20,6 @@ function formatNcm(ncm?: string | null) {
   return [d.slice(0, 4), d.slice(4, 6), d.slice(6, 8)].filter(Boolean).join(".");
 }
 
-// ======== apenas para upload (mantém seu fluxo existente) ========
-const svcImportarPlanilha =
-  // @ts-ignore
-  (ncmsService.importarNcmsPlanilha as (file: File) => Promise<{
-    inseridos?: number;
-    atualizados?: number;
-    totalLidas?: number;
-  }>) ??
-  // @ts-ignore
-  (ncmsService.importarPlanilhaNcms as (file: File) => Promise<any>);
-
-// ===================== Consulta direta ao Firestore =====================
-const COL = "ncmsCGIM"; // conforme seu Firestore
-
-type PageResult = {
-  items: NcmLinha[];
-  lastVisible?: QueryDocumentSnapshot<DocumentData>;
-  page?: number;
-  total?: number;
-};
-
-function makeBaseQuery(db: ReturnType<typeof getFirestore>, opts: { prefix?: string }) {
-  const colRef = collection(db, COL);
-  const constraints: any[] = [orderBy("ncm")];
-
-  const prefix = onlyDigits(opts.prefix);
-  if (prefix) {
-    constraints.push(where("ncm", ">=", prefix));
-    constraints.push(where("ncm", "<=", prefix + "\uf8ff"));
-  }
-
-  return { colRef, constraints };
-}
-
-async function listNcmsOnce(opts: {
-  limit: number;
-  prefix?: string;
-  after?: QueryDocumentSnapshot<DocumentData>;
-}): Promise<PageResult> {
-  const db = getFirestore();
-  const { colRef, constraints } = makeBaseQuery(db, { prefix: opts.prefix });
-
-  const q = query(
-    colRef,
-    ...constraints,
-    ...(opts.after ? [startAfter(opts.after)] : []),
-    qlimit(Math.max(1, opts.limit))
-  );
-
-  const snap = await getDocs(q);
-  const items: NcmLinha[] = snap.docs.map((d) => {
-    const v: any = d.data() || {};
-    return {
-      ncm: String(v.ncm ?? d.id ?? ""),
-      setor: v.setor || "",
-      produto: v.produto || "",
-    };
-  });
-
-  return {
-    items,
-    lastVisible: snap.docs[snap.docs.length - 1],
-  };
-}
-
-async function countNcmsOnce(prefix?: string) {
-  const db = getFirestore();
-  const { colRef, constraints } = makeBaseQuery(db, { prefix });
-  const q = query(colRef, ...constraints);
-  const agg = await getCountFromServer(q);
-  return Number(agg.data().count || 0);
-}
-
-// ============================== Página ==============================
 const PAGE_SIZES = [25, 50, 100, 200];
 
 const ConfiguracoesPage: React.FC = () => {
@@ -118,25 +29,22 @@ const ConfiguracoesPage: React.FC = () => {
   const [carregando, setCarregando] = useState<boolean>(false);
   const [total, setTotal] = useState<number>(0);
 
-  const lastVisibleRef = useRef<QueryDocumentSnapshot<DocumentData> | undefined>(undefined);
+  const nextCursorRef = useRef<string | undefined>(undefined);
+
   const totalFmt = useMemo(() => new Intl.NumberFormat("pt-BR").format(total), [total]);
 
-  // Carrega imediatamente a primeira página; conta em paralelo
+  // 1ª carga: lista primeiro (rápido), conta em paralelo
   useEffect(() => {
     (async () => {
       try {
         setCarregando(true);
-
-        const lista = await listNcmsOnce({
-          limit: pageSize,
-          prefix: prefixo,
-        });
-        setLinhas(lista.items);
-        lastVisibleRef.current = lista.lastVisible;
+        const res = await listarNcmsPorPrefixoPaginado(onlyDigits(prefixo), pageSize);
+        setLinhas(res.items);
+        nextCursorRef.current = res.nextCursor;
         setCarregando(false);
 
-        // contagem em paralelo (não bloqueia a UI)
-        countNcmsOnce(prefixo)
+        // conta em paralelo
+        getNcmCountCgim(onlyDigits(prefixo))
           .then((t) => setTotal(t))
           .catch((e) => console.warn("Falha ao contar:", e));
       } catch (e) {
@@ -152,20 +60,19 @@ const ConfiguracoesPage: React.FC = () => {
     if (!file) return;
     try {
       setCarregando(true);
-      const res = await svcImportarPlanilha(file);
-      const { inseridos, atualizados, totalLidas } = res || {};
+      const res = await importarNcmsPlanilha(file);
       toast.success(
-        `Planilha processada. Lidas: ${totalLidas ?? "?"} · Inseridos: ${inseridos ?? "?"} · Atualizados: ${atualizados ?? "?"}`
+        `Planilha processada. Total de linhas gravadas/atualizadas: ${res?.total ?? "?"}`
       );
 
-      // Recarrega primeira página rápido
-      const lista = await listNcmsOnce({ limit: pageSize, prefix: prefixo });
-      setLinhas(lista.items);
-      lastVisibleRef.current = lista.lastVisible;
+      // Reload primeira página
+      const L = await listarNcmsPorPrefixoPaginado(onlyDigits(prefixo), pageSize);
+      setLinhas(L.items);
+      nextCursorRef.current = L.nextCursor;
       setCarregando(false);
 
-      // Conta em paralelo
-      countNcmsOnce(prefixo)
+      // Count em paralelo
+      getNcmCountCgim(onlyDigits(prefixo))
         .then((t) => setTotal(t))
         .catch((e) => console.warn("Falha ao contar após importação:", e));
     } catch (e) {
@@ -178,13 +85,12 @@ const ConfiguracoesPage: React.FC = () => {
   const aplicarFiltro = async () => {
     try {
       setCarregando(true);
-      const lista = await listNcmsOnce({ limit: pageSize, prefix: prefixo });
-      setLinhas(lista.items);
-      lastVisibleRef.current = lista.lastVisible;
+      const res = await listarNcmsPorPrefixoPaginado(onlyDigits(prefixo), pageSize);
+      setLinhas(res.items);
+      nextCursorRef.current = res.nextCursor;
       setCarregando(false);
 
-      // Conta em paralelo
-      countNcmsOnce(prefixo)
+      getNcmCountCgim(onlyDigits(prefixo))
         .then((t) => setTotal(t))
         .catch((e) => console.warn("Falha ao contar no filtro:", e));
     } catch (e) {
@@ -196,15 +102,15 @@ const ConfiguracoesPage: React.FC = () => {
 
   const proximaPagina = async () => {
     try {
-      if (!lastVisibleRef.current) return;
+      if (!nextCursorRef.current) return;
       setCarregando(true);
-      const lista = await listNcmsOnce({
-        limit: pageSize,
-        prefix: prefixo,
-        after: lastVisibleRef.current,
-      });
-      setLinhas(lista.items);
-      lastVisibleRef.current = lista.lastVisible;
+      const res: Page<NcmLinha> = await listarNcmsPorPrefixoPaginado(
+        onlyDigits(prefixo),
+        pageSize,
+        nextCursorRef.current
+      );
+      setLinhas(res.items);
+      nextCursorRef.current = res.nextCursor;
       setCarregando(false);
     } catch (e) {
       console.error(e);
@@ -276,7 +182,7 @@ const ConfiguracoesPage: React.FC = () => {
           <button
             onClick={proximaPagina}
             className="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300"
-            disabled={carregando || !lastVisibleRef.current}
+            disabled={carregando || !nextCursorRef.current}
           >
             Próxima página
           </button>
@@ -328,4 +234,3 @@ const ConfiguracoesPage: React.FC = () => {
 };
 
 export default ConfiguracoesPage;
-
