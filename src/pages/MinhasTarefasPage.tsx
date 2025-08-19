@@ -358,9 +358,9 @@ const MinhasTarefasPage: React.FC = () => {
             norm(a.pleitoKey) || `${ncm8}|${produtoNk}`
           }`;
 
-        const prev = byScopedKey.get(scopedKey);
-        if (!prev) byScopedKey.set(scopedKey, a);
-        else {
+          const prev = byScopedKey.get(scopedKey);
+          if (!prev) byScopedKey.set(scopedKey, a);
+          else {
             const pick =
               toMillis(a.updatedAt) > toMillis(prev.updatedAt)
                 ? a
@@ -463,6 +463,8 @@ const MinhasTarefasPage: React.FC = () => {
   function openAnalyse(t: Atribuicao) {
     const atrId = t.id || makeAtribuicaoId(t.pleitoKey || "");
     const url = `/analise/${encodeURIComponent(atrId)}`;
+    const el = document.activeElement as HTMLElement | null;
+    el?.blur?.();
     nav(url);
   }
 
@@ -471,8 +473,49 @@ const MinhasTarefasPage: React.FC = () => {
     if (!sourceId) return;
     const atrId = t.id || makeAtribuicaoId(t.pleitoKey || "");
     const url = `/analise/${encodeURIComponent(atrId)}?copyFrom=${encodeURIComponent(sourceId)}`;
+    const el = document.activeElement as HTMLElement | null;
+    el?.blur?.();
     nav(url);
   }
+
+  // ====== UI helpers (somente aparência) ======
+  const statusBadge = (s?: string) => {
+    const n = normalizeStatus(s);
+    const map: Record<string, string> = {
+      nao_iniciado: "bg-gray-100 text-gray-700 border border-gray-200",
+      em_analise: "bg-blue-100 text-blue-700 border border-blue-200",
+      concluido: "bg-green-100 text-green-700 border border-green-200",
+    };
+    const label: Record<string, string> = {
+      nao_iniciado: "Novo",
+      em_analise: "Em Análise",
+      concluido: "Concluído",
+    };
+    return (
+      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${map[n] || ""}`}>
+        {label[n] || "—"}
+      </span>
+    );
+  };
+
+  const CardSkeleton: React.FC = () => (
+    <div className="rounded-xl border bg-white/70 p-4 animate-pulse">
+      <div className="flex items-start justify-between gap-3">
+        <div className="h-5 w-40 bg-gray-200 rounded" />
+        <div className="h-5 w-20 bg-gray-200 rounded" />
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <div className="h-4 w-full bg-gray-200 rounded" />
+        <div className="h-4 w-full bg-gray-200 rounded" />
+        <div className="h-4 w-full bg-gray-200 rounded" />
+        <div className="h-4 w-full bg-gray-200 rounded" />
+      </div>
+      <div className="mt-4 flex gap-2">
+        <div className="h-8 w-20 bg-gray-200 rounded" />
+        <div className="h-8 w-32 bg-gray-200 rounded" />
+      </div>
+    </div>
+  );
 
   return (
     <div className="w-full space-y-6 p-6">
@@ -480,7 +523,7 @@ const MinhasTarefasPage: React.FC = () => {
         <h1 className="text-2xl font-semibold">Minhas Tarefas</h1>
       </div>
 
-      {/* Cards + gráfico de status */}
+      {/* Resumo + gráfico de status */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
         <div className="p-4 border rounded-xl bg-white/70">
           <div className="text-sm text-gray-500">Total</div>
@@ -516,82 +559,94 @@ const MinhasTarefasPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Tabela — linhas clicáveis (SEM a coluna Status) */}
-      <div className="bg-white rounded border overflow-hidden">
-        <table className="min-w-full text-sm">
-          <thead className="bg-gray-100">
-            <tr>
-              <th className="p-3 text-left">Seção</th>
-              <th className="p-3 text-left">NCM</th>
-              <th className="p-3 text-left">Produto</th>
-              <th className="p-3 text-left">Pleiteante</th>
-              <th className="p-3 text-left">Tipo</th>
-              <th className="p-3 text-left w-56">Ações</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && (
-              <tr>
-                <td className="p-4 text-gray-500" colSpan={6}>
-                  Carregando…
-                </td>
-              </tr>
-            )}
-            {!loading && tarefas.length === 0 && (
-              <tr>
-                <td className="p-4 text-gray-500" colSpan={6}>
-                  Nenhuma tarefa atribuída a você.
-                </td>
-              </tr>
-            )}
-            {!loading &&
-              tarefas.map((t) => {
-                const canReuse = !!(t.pleitoKey && priorMap[t.id]);
-                return (
-                  <tr
-                    key={t.id}
-                    className="hover:bg-gray-50 cursor-pointer"
-                    onClick={() => openAnalyse(t)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        openAnalyse(t);
-                      }
-                    }}
-                  >
-                    <td className="p-3">{renderStr(t.tituloSecao)}</td>
-                    <td className="p-3">{fmtNCM(t.ncm)}</td>
-                    <td className="p-3">{renderStr(t.produto)}</td>
-                    <td className="p-3">{renderStr(t.pleiteante)}</td>
-                    <td className="p-3">{renderStr(t.tipoPleito)}</td>
-                    <td className="p-3" onClick={(e) => e.stopPropagation()}>
-                      <div className="flex gap-2">
-                        <button
-                          className="px-3 py-1 rounded border text-sm hover:bg-gray-100"
-                          onClick={() => openAnalyse(t)}
-                          aria-label="Abrir análise"
-                        >
-                          Abrir
-                        </button>
-                        {canReuse && (
-                          <button
-                            className="px-3 py-1 rounded border text-sm hover:bg-gray-100"
-                            onClick={() => onReaproveitar(t)}
-                            aria-label="Reaproveitar análise anterior"
-                            title="Reaproveitar análise anterior"
-                          >
-                            Reaproveitar análise
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-          </tbody>
-        </table>
+      {/* ====== Cards (mudança apenas de aparência; mesma navegação/ações) ====== */}
+      <div className="w-full">
+        {/* carregando */}
+        {loading && (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <CardSkeleton key={i} />
+            ))}
+          </div>
+        )}
+
+        {/* vazio */}
+        {!loading && tarefas.length === 0 && (
+          <div className="rounded-xl border bg-white/70 p-6 text-gray-600">
+            Nenhuma tarefa atribuída a você.
+          </div>
+        )}
+
+        {/* lista de cards */}
+        {!loading && tarefas.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+            {tarefas.map((t) => {
+              const canReuse = !!(t.pleitoKey && priorMap[t.id]);
+              const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openAnalyse(t);
+                }
+              };
+              return (
+                <div
+                  key={t.id}
+                  className="rounded-xl border bg-white/70 p-4 hover:shadow-md transition cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openAnalyse(t)}
+                  onKeyDown={handleKeyDown}
+                >
+                  {/* Cabeçalho */}
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs text-gray-500">{renderStr(t.tituloSecao)}</div>
+                      <div className="mt-0.5 font-semibold truncate">{renderStr(t.produto)}</div>
+                    </div>
+                    {statusBadge(t.status)}
+                  </div>
+
+                  {/* Infos principais */}
+                  <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                    <div className="space-y-1">
+                      <div className="text-xs text-gray-500">NCM</div>
+                      <div className="font-medium">{fmtNCM(t.ncm)}</div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs text-gray-500">Tipo de Pleito</div>
+                      <div className="font-medium">{renderStr(t.tipoPleito)}</div>
+                    </div>
+                    <div className="space-y-1 col-span-2">
+                      <div className="text-xs text-gray-500">Pleiteante</div>
+                      <div className="font-medium truncate">{renderStr(t.pleiteante)}</div>
+                    </div>
+                  </div>
+
+                  {/* Ações */}
+                  <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100"
+                      onClick={() => openAnalyse(t)}
+                      aria-label="Abrir análise"
+                    >
+                      Abrir
+                    </button>
+                    {canReuse && (
+                      <button
+                        className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100"
+                        onClick={() => onReaproveitar(t)}
+                        aria-label="Reaproveitar análise anterior"
+                        title="Reaproveitar análise anterior"
+                      >
+                        Reaproveitar análise
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
