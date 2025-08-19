@@ -50,6 +50,9 @@ const svcImportarPlanilha =
   (ncmsService.importarPlanilhaNcms as (file: File) => Promise<any>);
 
 const svcContarNcms =
+  // tenta o contador mais novo, se existir
+  // @ts-expect-error
+  (ncmsService.getNcmCountCgim as (prefix?: string) => Promise<number>) ??
   // @ts-expect-error
   (ncmsService.contarNcms as (prefix?: string) => Promise<number>) ??
   // @ts-expect-error
@@ -67,18 +70,9 @@ async function svcListarNcms(
 ): Promise<PageResult> {
   const { limit, prefix, cursor, page } = opts;
 
-  // 1) listarNcmsPaginado(prefix, limit, cursor)
-  // 2) listarNcms({ limit, prefix, page })
+  // 1) listarNcms({ limit, prefix, page })
+  // 2) listarNcmsPaginado(...)  ← assinatura pode variar entre (limit, cursor) ou (prefix, limit, cursor)
   // 3) listarNcmsPorPagina(prefix, page, limit)
-  if ((ncmsService as any).listarNcmsPaginado) {
-    const res = await (ncmsService as any).listarNcmsPaginado(prefix || "", limit, cursor);
-    return {
-      items: res?.items || [],
-      nextCursor: res?.nextCursor,
-      page: undefined,
-      total: res?.total,
-    };
-  }
   if ((ncmsService as any).listarNcms) {
     const res = await (ncmsService as any).listarNcms({ limit, prefix, page });
     return {
@@ -87,6 +81,32 @@ async function svcListarNcms(
       page: res?.page,
       total: res?.total,
     };
+  }
+  if ((ncmsService as any).listarNcmsPaginado) {
+    const fn = (ncmsService as any).listarNcmsPaginado;
+    try {
+      const arity = typeof fn === 'function' ? fn.length : 0;
+      let res;
+      if (arity >= 3) {
+        // assume (prefix, limit, cursor)
+        res = await fn(prefix || "", limit, cursor);
+      } else if (arity === 2) {
+        // assume (limit, cursor)
+        res = await fn(limit, cursor);
+      } else {
+        // fallback: tenta (limit)
+        res = await fn(limit);
+      }
+      return {
+        items: res?.items || res?.itens || [],
+        nextCursor: res?.nextCursor,
+        page: res?.page,
+        total: res?.total,
+      };
+    } catch (e) {
+      // se falhar, ignora e tenta o próximo
+      console.error("listarNcmsPaginado (compat) falhou:", e);
+    }
   }
   if ((ncmsService as any).listarNcmsPorPagina) {
     const res = await (ncmsService as any).listarNcmsPorPagina(prefix || "", page ?? 1, limit);
@@ -377,17 +397,5 @@ const ConfiguracoesPage: React.FC = () => {
             ) : (
               linhasFiltradas.map((l) => (
                 <tr key={l.ncm} className="border-t">
-                  <td className="px-4 py-3 font-mono">{formatNcm(l.ncm) || "—"}</td>
-                  <td className="px-4 py-3">{l.setor || "—"}</td>
-                  <td className="px-4 py-3">{l.produto || "—"}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-};
+                  <td className="px-4 py-3 font-mono">{formatNcm(l.ncm) || "
 
-export default ConfiguracoesPage;
