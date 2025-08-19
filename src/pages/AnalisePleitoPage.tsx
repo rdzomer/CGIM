@@ -240,48 +240,48 @@ const AnalisePleitoPage: React.FC = () => {
             ? pauta.secoes
             : [];
 
-        const alvoKey = (atrib.pleitoKey || `${atrib.ncm}|${atrib.produto}|${atrib.pleiteante}`).trim();
-        const ncmAlvo = onlyDigits(atrib.ncm || "");
-        const produtoAlvo = (atrib.produto || "").trim().toLowerCase();
-        const pleiteanteAlvo = (atrib.pleiteante || "").trim().toLowerCase();
+          const alvoKey = (atrib.pleitoKey || `${atrib.ncm}|${atrib.produto}|${atrib.pleiteante}`).trim();
+          const ncmAlvo = onlyDigits(atrib.ncm || "");
+          const produtoAlvo = (atrib.produto || "").trim().toLowerCase();
+          const pleiteanteAlvo = (atrib.pleiteante || "").trim().toLowerCase();
 
-        const best: Best = { score: -1, row: null };
-        for (const s of sections) {
-          const rows: any[] = Array.isArray(s?.rows) ? s.rows : [];
-          for (const r of rows) {
-            const sc = scoreRow(r, alvoKey, ncmAlvo, produtoAlvo, pleiteanteAlvo);
-            if (sc > best.score) {
-              best.score = sc;
-              best.row = r;
+          const best: Best = { score: -1, row: null };
+          for (const s of sections) {
+            const rows: any[] = Array.isArray(s?.rows) ? s.rows : [];
+            for (const r of rows) {
+              const sc = scoreRow(r, alvoKey, ncmAlvo, produtoAlvo, pleiteanteAlvo);
+              if (sc > best.score) {
+                best.score = sc;
+                best.row = r;
+              }
+              if (best.score >= 100) break;
             }
             if (best.score >= 100) break;
           }
-          if (best.score >= 100) break;
+          line = best.row;
         }
-        line = best.row;
-      }
 
-      // Ficha amigável e extração do pedido
-      const fichaLocal: Record<string, string> = {};
-      const base = line || {};
-      for (const [k, val] of Object.entries(base)) {
-        const keyLower = k.toLowerCase();
-        if (HIDDEN_KEYS.test(keyLower)) continue;
-        if (["key", "pleitoKey"].includes(keyLower)) continue;
-        let display = String(val ?? "").trim();
-        if (!display) continue;
-        if (keyLower === "ncm") display = fmtNcm(display);
-        fichaLocal[friendlyLabel(k)] = display;
-      }
-      if (!fichaLocal["NCM"] && atrib.ncm) fichaLocal["NCM"] = fmtNcm(atrib.ncm);
-      if (!fichaLocal["Produto"] && atrib.produto) fichaLocal["Produto"] = atrib.produto;
-      if (!fichaLocal["Pleiteante"] && atrib.pleiteante) fichaLocal["Pleiteante"] = atrib.pleiteante;
+        // Ficha amigável e extração do pedido
+        const fichaLocal: Record<string, string> = {};
+        const base = line || {};
+        for (const [k, val] of Object.entries(base)) {
+          const keyLower = k.toLowerCase();
+          if (HIDDEN_KEYS.test(keyLower)) continue;
+          if (["key", "pleitoKey"].includes(keyLower)) continue;
+          let display = String(val ?? "").trim();
+          if (!display) continue;
+          if (keyLower === "ncm") display = fmtNcm(display);
+          fichaLocal[friendlyLabel(k)] = display;
+        }
+        if (!fichaLocal["NCM"] && atrib.ncm) fichaLocal["NCM"] = fmtNcm(atrib.ncm);
+        if (!fichaLocal["Produto"] && atrib.produto) fichaLocal["Produto"] = atrib.produto;
+        if (!fichaLocal["Pleiteante"] && atrib.pleiteante) fichaLocal["Pleiteante"] = atrib.pleiteante;
 
-      setFicha(fichaLocal);
-      setPedido(extractPedido(base));
-    } finally {
-      setCarregando(false);
-    }
+        setFicha(fichaLocal);
+        setPedido(extractPedido(base));
+      } finally {
+        setCarregando(false);
+      }
     })();
   }, [atrId, navigate, copyFrom]);
 
@@ -566,7 +566,8 @@ const AnalisePleitoPage: React.FC = () => {
           <div>
             <label className="block text-sm text-slate-600 mb-1">Sugestão</label>
             <textarea
-              className="w-full border rounded-lg p-2 min-h-[220px] resize-y"
+              className="w-full border rounded-lg p-2 min-h-[60px] max-h-[100px] resize-y"
+              rows={3}
               value={form.sugestao || ""}
               onChange={(e) => setForm((f) => ({ ...f, sugestao: e.target.value }))}
             />
@@ -595,5 +596,3 @@ const AnalisePleitoPage: React.FC = () => {
 };
 
 export default AnalisePleitoPage;
-
-
