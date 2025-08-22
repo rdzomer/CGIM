@@ -10,10 +10,10 @@ import {
   query,
   where,
 } from "firebase/firestore";
-import { Download, Filter, Printer } from "lucide-react";
+import { Download, Printer } from "lucide-react";
 import { exportRelatorioDocx, CabecalhoRelatorio } from "../services/relatorioExport";
 
-/** ===================== Utils (normalização) ===================== */
+/** ===================== Utils ===================== */
 const norm = (s?: any) =>
   String(s ?? "")
     .replace(/\u00A0/g, " ")
@@ -40,19 +40,17 @@ const normalizeStatus = (s?: string) => {
   return "nao_iniciado";
 };
 
-type ModoSecoes = "todas" | "tecnica_sugestao";
-
-/** Texto preenchido conforme modo escolhido */
-const hasTextForMode = (a?: AnaliseBloco | null, modo: ModoSecoes = "todas") => {
+const hasTecnicaOuSugestao = (a?: AnaliseBloco | null) => {
   if (!a) return false;
-  const resumo = norm(a.resumo);
-  const comercio = norm(a.comercio);
-  const tecnica = norm(a.tecnica);
-  const sugestao = norm(a.sugestao);
-  if (modo === "todas") return [resumo, comercio, tecnica, sugestao].some((v) => v.length > 0);
-  // Apenas Técnica + Sugestão
-  return (!!tecnica && tecnica.length > 0) || (!!sugestao && sugestao.length > 0);
+  return norm(a.tecnica).length > 0 || norm(a.sugestao).length > 0;
 };
+
+const escapeHtml = (t: string) =>
+  t
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\n/g, "<br>");
 
 /** ===================== Tipos ===================== */
 type PautaDoc = {
@@ -120,7 +118,6 @@ function flattenPauta(p: PautaDoc): Array<{ secao: string; row: any }> {
   for (const sec of list as any[]) {
     const secTitle = String(sec?.title ?? sec?.titulo ?? "") || "";
     pushRows(secTitle, sec?.rows);
-    // compat com estruturas alternativas
     if (Array.isArray(sec?.tabelas)) {
       for (const t of sec.tabelas) pushRows(secTitle, t?.rows);
     }
@@ -179,9 +176,9 @@ function analiseFromLegacy(a: Atribuicao): AnaliseBloco {
 /** Heurística: remover artefatos de OCR/planilha como "Col_1", "Col. 1", "col-1" */
 function isColArtefact(key: string) {
   const k = normKey(key);
-  if (/^col[\s._-]*\d+$/.test(k)) return true; // col_1, col 2, col-3
-  if (/^col[\s._-]*\d+\s*\(.+\)$/.test(k)) return true; // col_1 (…)
-  if (/^col\.\s*\d+$/.test(k)) return true; // col. 1
+  if (/^col[\s._-]*\d+$/.test(k)) return true;
+  if (/^col[\s._-]*\d+\s*\(.+\)$/.test(k)) return true;
+  if (/^col\.\s*\d+$/.test(k)) return true;
   return false;
 }
 
@@ -197,13 +194,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
   const [atribuicoes, setAtribuicoes] = useState<Atribuicao[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Filtro: incluir apenas itens com algum texto
-  const [apenasComTexto, setApenasComTexto] = useState(true);
-
-  // Novo: escolher se imprime todas as seções ou só Técnica + Sugestão
-  const [modoSecoes, setModoSecoes] = useState<ModoSecoes>("todas");
-
-  // Carrega opções de pautas (para dropdown)
+  // Carrega opções de pautas (dropdown)
   useEffect(() => {
     (async () => {
       const snap = await getDocs(collection(db, "pautas"));
@@ -217,7 +208,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
           titulo: String(v?.titulo || v?.meeting || ""),
         });
       });
-      // ordena por meeting/título desc para trazer as mais recentes primeiro
       opts.sort((a, b) => b.meeting.localeCompare(a.meeting));
       setPautas(opts);
 
@@ -257,7 +247,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     })();
   }, [pautaSel, db]);
 
-  // Carrega atribuições da pauta, com FALLOVER inteligente
+  // Carrega atribuições da pauta, com fallback por pleitoKey caso necessário
   useEffect(() => {
     if (!pautaSel) return;
     (async () => {
@@ -266,11 +256,11 @@ const RelatorioConsolidadoPage: React.FC = () => {
         const col = collection(db, "atribuicoes");
         const arr: Atribuicao[] = [];
 
-        // 1) Tentativa principal: por pautaId
+        // 1) por pautaId
         const snap1 = await getDocs(query(col, where("pautaId", "==", pautaSel)));
         snap1.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
 
-        // 2) Se não achou nada, fallback por pleitoKey (docs legados sem pautaId)
+        // 2) fallback por chaves da pauta (docs legados sem pautaId)
         if (arr.length === 0 && pautaDoc) {
           const keysSet = new Set<string>();
           for (const { row } of flattenPauta(pautaDoc)) {
@@ -278,7 +268,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
             if (k) keysSet.add(k);
           }
           const keys = Array.from(keysSet);
-          // Firestore "in" aceita no máx. 10 por consulta
           for (let i = 0; i < keys.length; i += 10) {
             const chunk = keys.slice(i, i + 10);
             const snap2 = await getDocs(query(col, where("pleitoKey", "in", chunk)));
@@ -286,7 +275,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
           }
         }
 
-        // Ajusta análises (fallback legado) e normaliza status
         const ajustados = arr.map((a) => {
           const analise = a.analise ?? analiseFromLegacy(a);
           const status = normalizeStatus(a.status);
@@ -300,7 +288,11 @@ const RelatorioConsolidadoPage: React.FC = () => {
     })().catch(console.error);
   }, [pautaSel, pautaDoc, db]);
 
-  // Monta itens finais na ORDEM da pauta (apenas status concluído e, se marcado, com texto)
+  /** Monta itens finais seguindo a ordem da pauta.
+   * Inclui somente ATRIBUIÇÕES:
+   * - status concluído
+   * - com Análise Técnica e/ou Sugestão CGIM preenchidas
+   */
   const itensBase: ItemRelatorio[] = useMemo(() => {
     if (!pautaDoc) return [];
 
@@ -308,9 +300,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
     const out: ItemRelatorio[] = [];
     let i = 1;
 
-    // indexa atribuições por chave e por NCM+Produto
     const byKey = new Map<string, Atribuicao>();
     const byPair = new Map<string, Atribuicao>(); // ncm|produto
+
     for (const a of atribuicoes) {
       const ncm8 = only8(a.ncm);
       const prod = normKey(a.produto);
@@ -320,25 +312,16 @@ const RelatorioConsolidadoPage: React.FC = () => {
     }
 
     const isOk = (a: Atribuicao | undefined) =>
-      !!a &&
-      normalizeStatus(a.status) === "concluido" &&
-      (!apenasComTexto || hasTextForMode(a.analise, modoSecoes));
+      !!a && normalizeStatus(a.status) === "concluido" && hasTecnicaOuSugestao(a.analise);
 
     for (const { secao, row } of rows) {
       const { ncm, produto, pleiteante, tipoPleito } = projectLinha(row);
       const key = gerarPleitoKeyFromRow(row);
       let a: Atribuicao | undefined = undefined;
 
-      // 1) match por pleitoKey
-      a = byKey.get(norm(key));
-      // 2) fallback por NCM + Produto (ignora pleiteante se vazio na pauta)
-      if (!a) {
-        const pair = `${only8(ncm)}|${normKey(produto)}`;
-        a = byPair.get(pair);
-      }
+      a = byKey.get(norm(key)) || byPair.get(`${only8(ncm)}|${normKey(produto)}`);
       if (!isOk(a)) continue;
 
-      // monta info residual da linha (tudo que não é estrutural)
       const info: Record<string, string> = {};
       Object.entries(row || {}).forEach(([k, v]) => {
         const nk = normKey(k);
@@ -363,14 +346,13 @@ const RelatorioConsolidadoPage: React.FC = () => {
         )
           return;
         if (["id", "key", "pleitokey"].includes(nk)) return;
-        if (isColArtefact(k)) return; // remove Col_1 / Col. 1
+        if (isColArtefact(k)) return;
         if (v == null) return;
         if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
           info[k] = String(v);
         }
       });
 
-      // analise já ajustada no carregamento
       const analise = a!.analise!;
       out.push({
         indice: i++,
@@ -391,130 +373,179 @@ const RelatorioConsolidadoPage: React.FC = () => {
     }
 
     return out;
-  }, [pautaDoc, atribuicoes, apenasComTexto, modoSecoes]);
+  }, [pautaDoc, atribuicoes]);
 
-  // Aplica filtro de seções para visualização/exportação (zera campos ocultos)
-  const itensFiltrados: ItemRelatorio[] = useMemo(() => {
-    if (modoSecoes === "todas") return itensBase;
+  /** Versão padrão (somente Técnica + Sugestão) para visualização/impresso padrão/DOCX */
+  const itensTS: ItemRelatorio[] = useMemo(() => {
     return itensBase.map((it) => ({
       ...it,
       analise: {
         ...it.analise,
-        resumo: "",   // oculta
-        comercio: "", // oculta
+        resumo: "",
+        comercio: "",
       },
     }));
-  }, [itensBase, modoSecoes]);
+  }, [itensBase]);
 
   const cabecalho: CabecalhoRelatorio = useMemo(() => {
     const sel = pautas.find((p) => p.id === pautaSel);
     const linhaTopo = "Ministério do Desenvolvimento, Indústria, Comércio e Serviços";
     const blocoCompleto = `Relatório de Análises – CGIM – Pauta ${sel?.meeting || pautaDoc?.meeting || ""}`;
-    const notas = [
-      apenasComTexto ? "Somente itens com texto" : "",
-      modoSecoes === "tecnica_sugestao"
-        ? 'Seções: apenas "Análise Técnica + Sugestão CGIM"'
-        : "Seções: todas (Resumo, Comércio, Técnica e Sugestão)",
-    ]
-      .filter(Boolean)
-      .join(" • ");
+    const notas = 'Seções: "Análise Técnica" e "Sugestão CGIM"';
     return { linhaTopo, blocoCompleto, apenasCgim: notas };
-  }, [pautaSel, pautas, pautaDoc, apenasComTexto, modoSecoes]);
+  }, [pautaSel, pautas, pautaDoc]);
 
   const baixarDocx = async () => {
     await exportRelatorioDocx({
       cabecalho,
-      itens: itensFiltrados, // respeita o modo de seções
+      itens: itensTS,
       nomeArquivo: `Relatorio_CGIM_${pautaDoc?.meeting || pautaSel}.docx`,
     });
   };
 
-  return (
-    <div className="p-4 md:p-8 max-w-[1400px] mx-auto">
-      <div className="flex flex-col md:flex-row md:items-end gap-4 md:gap-6 mb-6">
-        <div className="flex-1">
-          <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Relatório Consolidado</h1>
-          <p className="text-sm text-slate-600">
-            Gere o relatório dos pleitos <b>com análise concluída</b> da pauta selecionada. Você pode incluir apenas itens
-            com texto e escolher quais seções aparecerão na visualização, impressão e no DOCX.
-          </p>
-        </div>
+  /** Imprime o padrão (Técnica + Sugestão) usando o DOM atual */
+  const imprimirPadrao = () => window.print();
 
-        <div className="flex items-center gap-3">
-          <label className="text-sm text-slate-700">Pauta:</label>
-          <select
-            className="border rounded-lg px-3 py-2 bg-white"
-            value={pautaSel}
-            onChange={(e) => setPautaSel(e.target.value)}
-          >
-            {pautas.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.meeting || p.titulo || p.id}
-              </option>
-            ))}
-          </select>
-        </div>
+  /** Imprimir COMPLETO (abre uma janela minimalista com todas as seções) */
+  const imprimirCompleto = () => {
+    const win = window.open("", "_blank", "noopener,noreferrer,width=1024,height=800");
+    if (!win) return;
+
+    const title = `Relatório Completo – ${pautaDoc?.meeting || pautaSel}`;
+    const css = `
+      * { box-sizing: border-box; }
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 24px; color: #0f172a; }
+      h1 { font-size: 20px; margin: 0 0 8px; }
+      .sub { color: #475569; margin-bottom: 16px; }
+      .card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; margin-bottom: 12px; background: #fff; }
+      .head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+      .title { font-weight: 600; }
+      .meta { color: #64748b; font-size: 12px; }
+      .grid { display: grid; grid-template-columns: 1fr 2fr; gap: 8px 16px; font-size: 14px; margin-top: 8px; }
+      .sec { border-radius: 8px; padding: 10px; margin-top: 10px; font-size: 14px; line-height: 1.45; }
+      .resumo { background: #f8fafc; border: 1px solid #e2e8f0; }
+      .comercio { background: #eff6ff; border: 1px solid #bfdbfe; }
+      .tecnica { background: #fff7ed; border: 1px solid #fed7aa; }
+      .sugestao { background: #ecfdf5; border: 1px solid #a7f3d0; }
+      @media print { body { margin: 0; } .page-break { page-break-after: always; } }
+    `;
+    const header = `
+      <h1>${escapeHtml(title)}</h1>
+      <div class="sub">${escapeHtml(cabecalho.linhaTopo)} — ${escapeHtml(cabecalho.blocoCompleto)}</div>
+    `;
+
+    const bodyCards = itensBase
+      .map((it) => {
+        const info = Object.entries(it.infoDaPauta)
+          .map(([k, v]) => `<div><b>${escapeHtml(k)}:</b></div><div>${escapeHtml(String(v))}</div>`)
+          .join("");
+        const infoGrid = info ? `<div class="grid">${info}</div>` : "";
+
+        return `
+          <div class="card">
+            <div class="head">
+              <div class="title">${it.indice}. NCM ${escapeHtml(it.ncm)}</div>
+              <div class="meta">${escapeHtml(it.secaoTitulo)}${it.tipoPleito ? " • " + escapeHtml(it.tipoPleito) : ""}</div>
+            </div>
+            <div class="grid">
+              <div><b>Pleiteante:</b></div><div>${escapeHtml(it.pleiteante || "—")}</div>
+              <div><b>Produto:</b></div><div>${escapeHtml(it.produto || "—")}</div>
+            </div>
+            ${infoGrid}
+            ${it.analise.resumo ? `<div class="sec resumo"><b>Resumo:</b> ${escapeHtml(it.analise.resumo)}</div>` : ""}
+            ${it.analise.comercio ? `<div class="sec comercio"><b>Comércio:</b> ${escapeHtml(it.analise.comercio)}</div>` : ""}
+            ${it.analise.tecnica ? `<div class="sec tecnica"><b>Análise Técnica:</b> ${escapeHtml(it.analise.tecnica)}</div>` : ""}
+            ${it.analise.sugestao ? `<div class="sec sugestao"><b>Sugestão CGIM:</b> ${escapeHtml(it.analise.sugestao)}</div>` : ""}
+          </div>
+        `;
+      })
+      .join("\n");
+
+    const html = `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>${escapeHtml(title)}</title>
+          <style>${css}</style>
+        </head>
+        <body>
+          ${header}
+          ${bodyCards}
+          <script>
+            window.addEventListener('load', () => { window.print(); setTimeout(()=>window.close(), 300); });
+          </script>
+        </body>
+      </html>
+    `;
+
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+  };
+
+  return (
+    <div className="p-4 md:p-8 max-w-[1100px] mx-auto">
+      {/* Cabeçalho em uma coluna */}
+      <div className="mb-4">
+        <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Relatório Consolidado</h1>
+        <p className="text-sm text-slate-600 mt-1">
+          Visualização padrão com <b>Análise Técnica</b> e <b>Sugestão CGIM</b> dos pleitos <b>concluídos</b> da pauta selecionada.
+        </p>
       </div>
 
-      {/* Filtros */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
-        <div className="flex flex-col gap-2">
-          <label className="inline-flex items-center gap-2 text-slate-700">
-            <input
-              type="checkbox"
-              className="h-4 w-4"
-              checked={apenasComTexto}
-              onChange={(e) => setApenasComTexto(e.target.checked)}
-            />
-            <Filter className="h-4 w-4" />
-            <span>Incluir apenas quem tem texto (resumo/comércio/técnica/sugestão)</span>
-          </label>
-
-          {/* Novo: escolha de seções */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            <span className="text-sm text-slate-700">Seções do relatório:</span>
-            <label className="inline-flex items-center gap-2 text-sm">
-              <input
-                type="radio"
-                name="modo-secoes"
-                value="todas"
-                checked={modoSecoes === "todas"}
-                onChange={() => setModoSecoes("todas")}
-              />
-              Todas (Resumo, Comércio, Técnica e Sugestão)
-            </label>
-            <label className="inline-flex items-center gap-2 text-sm">
-              <input
-                type="radio"
-                name="modo-secoes"
-                value="tecnica_sugestao"
-                checked={modoSecoes === "tecnica_sugestao"}
-                onChange={() => setModoSecoes("tecnica_sugestao")}
-              />
-              Apenas <b>Análise Técnica</b> + <b>Sugestão CGIM</b>
-            </label>
+      {/* Barra de ações (abaixo do texto) */}
+      <div className="mb-6 flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-slate-700">Pauta:</label>
+            <select
+              className="border rounded-lg px-3 py-2 bg-white"
+              value={pautaSel}
+              onChange={(e) => setPautaSel(e.target.value)}
+            >
+              {pautas.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.meeting || p.titulo || p.id}
+                </option>
+              ))}
+            </select>
           </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            className="px-4 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
-            onClick={baixarDocx}
-            disabled={!itensFiltrados.length}
-            title={!itensFiltrados.length ? "Nenhum item para exportar" : "Exportar DOCX"}
-          >
-            <Download className="h-4 w-4 inline-block mr-2" />
-            Exportar DOCX
-          </button>
-          <button
-            className="px-4 py-2 rounded-xl bg-slate-200 text-slate-800 hover:bg-slate-300 disabled:opacity-60"
-            onClick={() => window.print()}
-            disabled={!itensFiltrados.length}
-            title={!itensFiltrados.length ? "Nenhum item para imprimir" : "Imprimir"}
-          >
-            <Printer className="h-4 w-4 inline-block mr-2" />
-            Imprimir
-          </button>
+          {/* separador flexível para empurrar botões à direita quando houver espaço */}
+          <div className="grow" />
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className="px-4 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+              onClick={baixarDocx}
+              disabled={!itensTS.length}
+              title={!itensTS.length ? "Nenhum item para exportar" : "Exportar DOCX (Técnica + Sugestão)"}
+            >
+              <Download className="h-4 w-4 inline-block mr-2" />
+              Exportar DOCX
+            </button>
+
+            <button
+              className="px-4 py-2 rounded-xl bg-slate-200 text-slate-800 hover:bg-slate-300 disabled:opacity-60"
+              onClick={imprimirPadrao}
+              disabled={!itensTS.length}
+              title={!itensTS.length ? "Nenhum item para imprimir" : "Imprimir (Técnica + Sugestão)"}
+            >
+              <Printer className="h-4 w-4 inline-block mr-2" />
+              Imprimir
+            </button>
+
+            {/* Discreto: imprimir completo */}
+            <button
+              className="px-3 py-2 text-sm text-slate-500 hover:text-slate-700 underline decoration-dotted disabled:opacity-60"
+              onClick={imprimirCompleto}
+              disabled={!itensBase.length}
+              title="Imprimir relatório completo (Resumo + Comércio + Técnica + Sugestão)"
+            >
+              Imprimir completo
+            </button>
+          </div>
         </div>
       </div>
 
@@ -522,9 +553,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
       {!loading && (
         <div className="space-y-4">
-          {itensFiltrados.map((it) => (
+          {/* Cards — SOMENTE Técnica + Sugestão */}
+          {itensTS.map((it) => (
             <div key={it.atribId || it.indice} className="rounded-xl border bg-white p-4">
-              {/* Cabeçalho do card */}
               <div className="flex items-center justify-between">
                 <div className="text-lg font-semibold">
                   {it.indice}. NCM {it.ncm}
@@ -534,40 +565,12 @@ const RelatorioConsolidadoPage: React.FC = () => {
                 </div>
               </div>
 
-              {/* Metadados principais */}
               <div className="mt-2 grid md:grid-cols-3 gap-3 text-sm">
                 <div><b>Pleiteante:</b> {it.pleiteante || "—"}</div>
                 <div className="md:col-span-2"><b>Produto:</b> {it.produto || "—"}</div>
               </div>
 
-              {/* Infos adicionais vindas da pauta */}
-              {Object.keys(it.infoDaPauta).length > 0 && (
-                <div className="mt-3 text-sm">
-                  <div className="font-medium text-slate-700 mb-1">Informações da Pauta</div>
-                  <div className="grid md:grid-cols-2 gap-2">
-                    {Object.entries(it.infoDaPauta).map(([k, v]) => (
-                      <div key={k}>
-                        <b>{k}:</b> <span className="text-slate-700">{v}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Blocos de análise — respeitam o modo de seções */}
               <div className="mt-4 space-y-3">
-                {it.analise.resumo && (
-                  <div className="border rounded-lg p-3 bg-slate-50 border-slate-200">
-                    <b className="text-slate-700">Resumo:</b>{" "}
-                    <span className="text-slate-900">{it.analise.resumo}</span>
-                  </div>
-                )}
-                {it.analise.comercio && (
-                  <div className="border rounded-lg p-3 bg-blue-50 border-blue-200">
-                    <b className="text-blue-800">Comércio:</b>{" "}
-                    <span className="text-blue-900">{it.analise.comercio}</span>
-                  </div>
-                )}
                 {it.analise.tecnica && (
                   <div className="border rounded-lg p-3 bg-amber-50 border-amber-200">
                     <b className="text-amber-800">Análise Técnica:</b>{" "}
@@ -584,14 +587,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
             </div>
           ))}
 
-          {!itensFiltrados.length && (
+          {!itensTS.length && (
             <div className="p-4 border rounded-xl bg-white/70 text-slate-600">
-              Nenhum item encontrado nesta pauta com os filtros atuais.
-              <ul className="list-disc pl-6 mt-2 space-y-1">
-                <li>Verifique se existem atribuições com <b>status Concluído</b> para esta pauta;</li>
-                <li>Se necessário, desmarque “apenas quem tem texto”;</li>
-                <li>Confirme a seleção de seções (todas vs. apenas Técnica + Sugestão).</li>
-              </ul>
+              Nenhum pleito concluído com Análise Técnica ou Sugestão CGIM para esta pauta.
             </div>
           )}
         </div>
