@@ -102,6 +102,7 @@ function projectLinha(row: PleitoRow) {
 }
 
 const ANALISTAS_FIXOS = ["Todos","Pedro Reckziegel","Ricardo Zomer","Antonio Azambuja"] as const;
+const STATUS_OPCOES = ["Todos", "Novo", "Em Análise", "Concluído"] as const;
 
 function nomeMatchesFiltro(nome: string | undefined | null, filtro: typeof ANALISTAS_FIXOS[number]) {
   if (!nome) return false;
@@ -109,6 +110,22 @@ function nomeMatchesFiltro(nome: string | undefined | null, filtro: typeof ANALI
   const a = normKey(nome);
   const b = normKey(filtro);
   return a === b || a.replace("antonio","antônio") === b || a.replace("antônio","antonio") === b;
+}
+
+function statusMatchesFiltro(statusRaw: string | undefined, filtro: typeof STATUS_OPCOES[number]) {
+  if (filtro === "Todos") return true;
+  const n = normalizeStatus(statusRaw);
+  if (filtro === "Concluído") return n === "concluido";
+  if (filtro === "Em Análise") return n === "em_analise";
+  return n === "nao_iniciado"; // "Novo"
+}
+
+function rowStyleByStatus(statusRaw?: string) {
+  const n = normalizeStatus(statusRaw);
+  // Fundo e borda lateral esquerda para aumentar a visibilidade
+  if (n === "concluido") return "bg-green-50 border-l-4 border-l-green-400";
+  if (n === "em_analise") return "bg-blue-50 border-l-4 border-l-blue-300";
+  return "bg-white border-l-4 border-l-gray-200";
 }
 
 // ---- auth hook ----
@@ -134,6 +151,9 @@ const DashboardPage: React.FC = () => {
   const [avisoNcm, setAvisoNcm] = useState("");
 
   const [analistaFiltro, setAnalistaFiltro] = useState<typeof ANALISTAS_FIXOS[number]>("Todos");
+  const [statusFiltro, setStatusFiltro] = useState<typeof STATUS_OPCOES[number]>("Todos");
+  const [somenteConcluidos, setSomenteConcluidos] = useState(false);
+
   const [pleitos, setPleitos] = useState<PleitoBase[]>([]);
   const [atribs, setAtribs] = useState<Atrib[]>([]);
 
@@ -197,12 +217,12 @@ const DashboardPage: React.FC = () => {
           atribsAll = s.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
         } else {
           const col = collection(db, "atribuicoes");
-          const queries = [
+          const queriesArr = [
             query(col, where("analistaNome", "==", analistaFiltro)),
             query(col, where("atribuido.nome", "==", analistaFiltro)),
             query(col, where("responsavelNome", "==", analistaFiltro)),
           ];
-          const results = await Promise.all(queries.map((q) => getDocs(q)));
+          const results = await Promise.all(queriesArr.map((q) => getDocs(q)));
           const tmp: Atrib[] = [];
           results.forEach((snap) => snap.forEach((d) => tmp.push({ id: d.id, ...(d.data() as any) })));
           const uniqA = new Map<string, Atrib>(); tmp.forEach((a) => uniqA.set(a.id, a));
@@ -230,14 +250,28 @@ const DashboardPage: React.FC = () => {
       const prev = byKey.get(k);
       if (!prev || toMillis(a.updatedAt) > toMillis(prev?.updatedAt)) byKey.set(k, a);
     }
-    return pleitos.map((p) => {
+    // mapa base
+    let base = pleitos.map((p) => {
       const at = byKey.get(p.pleitoKey) || null;
       const analista = at?.responsavelNome || at?.analistaNome || (at as any)?.atribuido?.nome || "";
       const sugestao = at?.analise?.sugestao ? String(at.analise.sugestao) : "";
       const status = at?.status || "Não iniciado";
       return { ...p, analista, sugestao, status, _atr: at };
-    }).filter((it) => analistaFiltro === "Todos" ? true : nomeMatchesFiltro(it.analista, analistaFiltro));
-  }, [pleitos, atribs, analistaFiltro]);
+    });
+
+    // filtro por analista
+    base = base.filter((it) => analistaFiltro === "Todos" ? true : nomeMatchesFiltro(it.analista, analistaFiltro));
+
+    // filtro por status (via select)
+    base = base.filter((it) => statusMatchesFiltro(it.status, statusFiltro));
+
+    // filtro rápido "somente concluídos"
+    if (somenteConcluidos) {
+      base = base.filter((it) => normalizeStatus(it.status) === "concluido");
+    }
+
+    return base;
+  }, [pleitos, atribs, analistaFiltro, statusFiltro, somenteConcluidos]);
 
   // ====== resumo + gráfico (mantidos) ======
   const resumo = useMemo(() => {
@@ -259,18 +293,44 @@ const DashboardPage: React.FC = () => {
   return (
     <div className="p-6">
       <div className="w-full space-y-6">
-        <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h1 className="text-2xl font-semibold">Pleitos CGIM</h1>
 
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-gray-600">Analista</label>
-            <select
-              className="border rounded px-2 py-1 text-sm"
-              value={analistaFiltro}
-              onChange={(e) => setAnalistaFiltro(e.target.value as typeof ANALISTAS_FIXOS[number])}
-            >
-              {ANALISTAS_FIXOS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
-            </select>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            {/* Filtro Analista */}
+            <div className="flex items-center gap-2">
+              <label className="text-sm text-gray-600 whitespace-nowrap">Analista</label>
+              <select
+                className="border rounded px-2 py-1 text-sm"
+                value={analistaFiltro}
+                onChange={(e) => setAnalistaFiltro(e.target.value as typeof ANALISTAS_FIXOS[number])}
+              >
+                {ANALISTAS_FIXOS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+              </select>
+            </div>
+
+            {/* Filtro Status */}
+            <div className="flex items-center gap-2">
+              <label className="text-sm text-gray-600 whitespace-nowrap">Status do pleito</label>
+              <select
+                className="border rounded px-2 py-1 text-sm"
+                value={statusFiltro}
+                onChange={(e) => setStatusFiltro(e.target.value as typeof STATUS_OPCOES[number])}
+              >
+                {STATUS_OPCOES.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+              </select>
+            </div>
+
+            {/* Somente concluídos */}
+            <label className="inline-flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="h-4 w-4"
+                checked={somenteConcluidos}
+                onChange={(e) => setSomenteConcluidos(e.target.checked)}
+              />
+              Somente concluídos
+            </label>
           </div>
         </div>
 
@@ -311,7 +371,7 @@ const DashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Tabela — SEM a coluna Status */}
+        {/* Tabela — agora COM a coluna Status e linhas coloridas por status */}
         <div className="border rounded-xl bg-white/70 overflow-auto">
           <table className="min-w-full text-sm">
             <thead>
@@ -320,22 +380,30 @@ const DashboardPage: React.FC = () => {
                 <th className="p-3 font-medium">Produto</th>
                 <th className="p-3 font-medium">Pleiteante</th>
                 <th className="p-3 font-medium">Tipo de Pleito</th>
+                <th className="p-3 font-medium">Status</th>
                 <th className="p-3 font-medium">Sugestão</th>
                 <th className="p-3 font-medium">Ações</th>
               </tr>
             </thead>
             <tbody>
-              {carregando && <tr><td className="p-3" colSpan={6}>Carregando…</td></tr>}
-              {!carregando && itens.length === 0 && <tr><td className="p-3" colSpan={6}>Nenhum pleito encontrado.</td></tr>}
+              {carregando && <tr><td className="p-3" colSpan={7}>Carregando…</td></tr>}
+              {!carregando && itens.length === 0 && <tr><td className="p-3" colSpan={7}>Nenhum pleito encontrado.</td></tr>}
               {!carregando && itens.map((it) => {
                 const showSug = !!it.sugestao;
                 const atrId = it._atr?.id || makeAtribuicaoId(it.pleitoKey);
+                const rowCls = rowStyleByStatus(it.status);
                 return (
-                  <tr key={it.pleitoKey} className="border-t align-top">
+                  <tr key={it.pleitoKey} className={`border-t align-top ${rowCls}`}>
                     <td className="p-3">{it.ncm ? `${it.ncm.slice(0,4)}.${it.ncm.slice(4,6)}.${it.ncm.slice(6,8)}` : "—"}</td>
                     <td className="p-3">{it.produto || it.tituloSecao || "—"}</td>
                     <td className="p-3">{it.pleiteante || "—"}</td>
                     <td className="p-3">{it.tipoPleito || "—"}</td>
+                    <td className="p-3">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                        bg-white/60 border">
+                        {displayStatus(it.status)}
+                      </span>
+                    </td>
                     <td className="p-3">
                       {showSug ? (
                         <span title={it.sugestao}>
@@ -357,6 +425,7 @@ const DashboardPage: React.FC = () => {
             </tbody>
           </table>
         </div>
+
       </div>
     </div>
   );
