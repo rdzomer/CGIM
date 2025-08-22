@@ -40,11 +40,19 @@ const normalizeStatus = (s?: string) => {
   return "nao_iniciado";
 };
 
-const hasAnyText = (a?: AnaliseBloco | null) =>
-  !!a &&
-  [a.resumo, a.comercio, a.tecnica, a.sugestao]
-    .map((v) => norm(v))
-    .some((v) => v.length > 0);
+type ModoSecoes = "todas" | "tecnica_sugestao";
+
+/** Texto preenchido conforme modo escolhido */
+const hasTextForMode = (a?: AnaliseBloco | null, modo: ModoSecoes = "todas") => {
+  if (!a) return false;
+  const resumo = norm(a.resumo);
+  const comercio = norm(a.comercio);
+  const tecnica = norm(a.tecnica);
+  const sugestao = norm(a.sugestao);
+  if (modo === "todas") return [resumo, comercio, tecnica, sugestao].some((v) => v.length > 0);
+  // Apenas Técnica + Sugestão
+  return (!!tecnica && tecnica.length > 0) || (!!sugestao && sugestao.length > 0);
+};
 
 /** ===================== Tipos ===================== */
 type PautaDoc = {
@@ -188,7 +196,12 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
   const [atribuicoes, setAtribuicoes] = useState<Atribuicao[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Filtro: incluir apenas itens com algum texto
   const [apenasComTexto, setApenasComTexto] = useState(true);
+
+  // Novo: escolher se imprime todas as seções ou só Técnica + Sugestão
+  const [modoSecoes, setModoSecoes] = useState<ModoSecoes>("todas");
 
   // Carrega opções de pautas (para dropdown)
   useEffect(() => {
@@ -287,8 +300,8 @@ const RelatorioConsolidadoPage: React.FC = () => {
     })().catch(console.error);
   }, [pautaSel, pautaDoc, db]);
 
-  // Monta itens finais na ORDEM da pauta
-  const itens: ItemRelatorio[] = useMemo(() => {
+  // Monta itens finais na ORDEM da pauta (apenas status concluído e, se marcado, com texto)
+  const itensBase: ItemRelatorio[] = useMemo(() => {
     if (!pautaDoc) return [];
 
     const rows = flattenPauta(pautaDoc);
@@ -307,7 +320,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
     }
 
     const isOk = (a: Atribuicao | undefined) =>
-      !!a && normalizeStatus(a.status) === "concluido" && (!apenasComTexto || hasAnyText(a.analise));
+      !!a &&
+      normalizeStatus(a.status) === "concluido" &&
+      (!apenasComTexto || hasTextForMode(a.analise, modoSecoes));
 
     for (const { secao, row } of rows) {
       const { ncm, produto, pleiteante, tipoPleito } = projectLinha(row);
@@ -348,7 +363,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
         )
           return;
         if (["id", "key", "pleitokey"].includes(nk)) return;
-        if (isColArtefact(k)) return;               // <<<<< remove Col_1 / Col. 1
+        if (isColArtefact(k)) return; // remove Col_1 / Col. 1
         if (v == null) return;
         if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
           info[k] = String(v);
@@ -376,21 +391,40 @@ const RelatorioConsolidadoPage: React.FC = () => {
     }
 
     return out;
-  }, [pautaDoc, atribuicoes, apenasComTexto]);
+  }, [pautaDoc, atribuicoes, apenasComTexto, modoSecoes]);
+
+  // Aplica filtro de seções para visualização/exportação (zera campos ocultos)
+  const itensFiltrados: ItemRelatorio[] = useMemo(() => {
+    if (modoSecoes === "todas") return itensBase;
+    return itensBase.map((it) => ({
+      ...it,
+      analise: {
+        ...it.analise,
+        resumo: "",   // oculta
+        comercio: "", // oculta
+      },
+    }));
+  }, [itensBase, modoSecoes]);
 
   const cabecalho: CabecalhoRelatorio = useMemo(() => {
     const sel = pautas.find((p) => p.id === pautaSel);
     const linhaTopo = "Ministério do Desenvolvimento, Indústria, Comércio e Serviços";
-    const blocoCompleto =
-      `Relatório de Análises – CGIM – Pauta ${sel?.meeting || pautaDoc?.meeting || ""}`;
-    const apenas = apenasComTexto ? "Somente pleitos com análise preenchida" : "";
-    return { linhaTopo, blocoCompleto, apenasCgim: apenas };
-  }, [pautaSel, pautas, pautaDoc, apenasComTexto]);
+    const blocoCompleto = `Relatório de Análises – CGIM – Pauta ${sel?.meeting || pautaDoc?.meeting || ""}`;
+    const notas = [
+      apenasComTexto ? "Somente itens com texto" : "",
+      modoSecoes === "tecnica_sugestao"
+        ? 'Seções: apenas "Análise Técnica + Sugestão CGIM"'
+        : "Seções: todas (Resumo, Comércio, Técnica e Sugestão)",
+    ]
+      .filter(Boolean)
+      .join(" • ");
+    return { linhaTopo, blocoCompleto, apenasCgim: notas };
+  }, [pautaSel, pautas, pautaDoc, apenasComTexto, modoSecoes]);
 
   const baixarDocx = async () => {
     await exportRelatorioDocx({
       cabecalho,
-      itens,
+      itens: itensFiltrados, // respeita o modo de seções
       nomeArquivo: `Relatorio_CGIM_${pautaDoc?.meeting || pautaSel}.docx`,
     });
   };
@@ -401,8 +435,8 @@ const RelatorioConsolidadoPage: React.FC = () => {
         <div className="flex-1">
           <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Relatório Consolidado</h1>
           <p className="text-sm text-slate-600">
-            Gerar relatório apenas dos pleitos <b>com análise concluída</b> na pauta selecionada. Utilize o filtro
-            para incluir ou excluir itens sem texto preenchido.
+            Gere o relatório dos pleitos <b>com análise concluída</b> da pauta selecionada. Você pode incluir apenas itens
+            com texto e escolher quais seções aparecerão na visualização, impressão e no DOCX.
           </p>
         </div>
 
@@ -422,8 +456,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
+      {/* Filtros */}
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">
+        <div className="flex flex-col gap-2">
           <label className="inline-flex items-center gap-2 text-slate-700">
             <input
               type="checkbox"
@@ -434,14 +469,39 @@ const RelatorioConsolidadoPage: React.FC = () => {
             <Filter className="h-4 w-4" />
             <span>Incluir apenas quem tem texto (resumo/comércio/técnica/sugestão)</span>
           </label>
+
+          {/* Novo: escolha de seções */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <span className="text-sm text-slate-700">Seções do relatório:</span>
+            <label className="inline-flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="modo-secoes"
+                value="todas"
+                checked={modoSecoes === "todas"}
+                onChange={() => setModoSecoes("todas")}
+              />
+              Todas (Resumo, Comércio, Técnica e Sugestão)
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="modo-secoes"
+                value="tecnica_sugestao"
+                checked={modoSecoes === "tecnica_sugestao"}
+                onChange={() => setModoSecoes("tecnica_sugestao")}
+              />
+              Apenas <b>Análise Técnica</b> + <b>Sugestão CGIM</b>
+            </label>
+          </div>
         </div>
 
         <div className="flex items-center gap-2">
           <button
             className="px-4 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
             onClick={baixarDocx}
-            disabled={!itens.length}
-            title={!itens.length ? "Nenhum item para exportar" : "Exportar DOCX"}
+            disabled={!itensFiltrados.length}
+            title={!itensFiltrados.length ? "Nenhum item para exportar" : "Exportar DOCX"}
           >
             <Download className="h-4 w-4 inline-block mr-2" />
             Exportar DOCX
@@ -449,7 +509,8 @@ const RelatorioConsolidadoPage: React.FC = () => {
           <button
             className="px-4 py-2 rounded-xl bg-slate-200 text-slate-800 hover:bg-slate-300 disabled:opacity-60"
             onClick={() => window.print()}
-            disabled={!itens.length}
+            disabled={!itensFiltrados.length}
+            title={!itensFiltrados.length ? "Nenhum item para imprimir" : "Imprimir"}
           >
             <Printer className="h-4 w-4 inline-block mr-2" />
             Imprimir
@@ -461,9 +522,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
       {!loading && (
         <div className="space-y-4">
-          {itens.map((it) => (
+          {itensFiltrados.map((it) => (
             <div key={it.atribId || it.indice} className="rounded-xl border bg-white p-4">
-              {/* Cabeçalho do card: sem título duplicado, apenas NCM e seção/tipo */}
+              {/* Cabeçalho do card */}
               <div className="flex items-center justify-between">
                 <div className="text-lg font-semibold">
                   {it.indice}. NCM {it.ncm}
@@ -493,7 +554,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
                 </div>
               )}
 
-              {/* Blocos de análise */}
+              {/* Blocos de análise — respeitam o modo de seções */}
               <div className="mt-4 space-y-3">
                 {it.analise.resumo && (
                   <div className="border rounded-lg p-3 bg-slate-50 border-slate-200">
@@ -523,13 +584,13 @@ const RelatorioConsolidadoPage: React.FC = () => {
             </div>
           ))}
 
-          {!itens.length && (
+          {!itensFiltrados.length && (
             <div className="p-4 border rounded-xl bg-white/70 text-slate-600">
-              Nenhum item encontrado nesta pauta. Verifique se:
+              Nenhum item encontrado nesta pauta com os filtros atuais.
               <ul className="list-disc pl-6 mt-2 space-y-1">
-                <li>Existem atribuições com <b>status Concluído</b> para esta pauta;</li>
-                <li>Os textos de análise foram preenchidos (ou desmarque o filtro “apenas quem tem texto”);</li>
-                <li>As atribuições mais antigas podem não ter <code>pautaId</code>; o relatório tenta buscá-las por <i>pleitoKey</i>.</li>
+                <li>Verifique se existem atribuições com <b>status Concluído</b> para esta pauta;</li>
+                <li>Se necessário, desmarque “apenas quem tem texto”;</li>
+                <li>Confirme a seleção de seções (todas vs. apenas Técnica + Sugestão).</li>
               </ul>
             </div>
           )}
