@@ -406,10 +406,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
   /** Imprime o padrão (Técnica + Sugestão) usando o DOM atual */
   const imprimirPadrao = () => window.print();
 
-  /** Imprimir COMPLETO (abre uma janela minimalista com todas as seções) */
+  /** Imprimir COMPLETO – versão robusta (Blob URL + onload, sem document.write) */
   const imprimirCompleto = () => {
-    const win = window.open("", "_blank", "noopener,noreferrer,width=1024,height=800");
-    if (!win) return;
+    if (!itensBase.length) return;
 
     const title = `Relatório Completo – ${pautaDoc?.meeting || pautaSel}`;
     const css = `
@@ -471,17 +470,53 @@ const RelatorioConsolidadoPage: React.FC = () => {
         </head>
         <body>
           ${header}
-          ${bodyCards}
+          ${bodyCards || "<div>Nenhum item para imprimir.</div>"}
           <script>
-            window.addEventListener('load', () => { window.print(); setTimeout(()=>window.close(), 300); });
+            window.addEventListener('load', function(){
+              setTimeout(function(){ window.print(); }, 200);
+            });
           </script>
         </body>
       </html>
     `;
 
-    win.document.open();
-    win.document.write(html);
-    win.document.close();
+    // Abre via Blob URL (robusto para Chrome/Edge/Win)
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+
+    const w = window.open(url, "_blank", "noopener,noreferrer,width=1024,height=800");
+    if (w && !w.closed) {
+      const revoke = () => URL.revokeObjectURL(url);
+      const timer = setTimeout(revoke, 60_000);
+      // Alguns navegadores não disparam onload do window; o script inline imprime de qualquer forma
+      w.addEventListener?.("load", () => {
+        clearTimeout(timer);
+        setTimeout(revoke, 10_000);
+      });
+      return;
+    }
+
+    // Fallback: iframe oculto
+    const iframe = document.createElement("iframe");
+    iframe.style.position = "fixed";
+    iframe.style.right = "0";
+    iframe.style.bottom = "0";
+    iframe.style.width = "1px";
+    iframe.style.height = "1px";
+    iframe.style.border = "0";
+    iframe.src = url;
+    iframe.onload = () => {
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      } finally {
+        setTimeout(() => {
+          URL.revokeObjectURL(url);
+          iframe.remove();
+        }, 5000);
+      }
+    };
+    document.body.appendChild(iframe);
   };
 
   return (
