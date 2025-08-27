@@ -20,6 +20,7 @@ type PautaItem = {
   secoes: number;
   pleitos: number;
   pleitosCgim: number;
+  novos?: number; alterados?: number; removidos?: number;
 };
 
 const norm = (s?: string) =>
@@ -28,20 +29,16 @@ const only8 = (s?: string) => (s ?? "").replace(/\D+/g, "").slice(0, 8);
 
 function safeStr(v: any, fallback = "—") {
   if (v == null) return fallback;
-  if (typeof v === "string") return norm(v) || fallback;
-  if (typeof v === "number") return String(v);
-  // evita “Objects are not valid as a React child”
-  return fallback;
+  if (typeof v === "string") return v || fallback;
+  return String(v);
 }
 
 function flattenRowsFromPauta(p: any): PautaRow[] {
   const out: PautaRow[] = [];
-
-  const secList = Array.isArray(p?.sections)
-    ? p.sections
-    : Array.isArray(p?.secoes)
-    ? p.secoes
-    : [];
+  const secList =
+    (Array.isArray(p?.sections) ? p.sections : undefined) ??
+    (Array.isArray(p?.secoes) ? p.secoes : undefined) ??
+    [];
 
   const pushRows = (rows?: any[]) => {
     if (!Array.isArray(rows)) return;
@@ -52,6 +49,9 @@ function flattenRowsFromPauta(p: any): PautaRow[] {
     pushRows(sec?.rows);
     if (Array.isArray(sec?.tabelas)) {
       for (const tb of sec.tabelas) pushRows(tb?.rows);
+    }
+    if (Array.isArray(sec?.tables)) {
+      for (const tb of sec.tables) pushRows(tb?.rows);
     }
     if (Array.isArray(sec?.pleitos)) pushRows(sec?.pleitos);
   }
@@ -74,26 +74,20 @@ function extractFields(row: PautaRow) {
       ) || "";
     return String(row?.[hit] ?? "");
   };
-  const ncm = by(["NCM", "Código NCM", "Codigo NCM", "Código", "Codigo", "NCM 8"]);
-  const produto = by([
-    "Produto",
-    "Descrição do Produto",
-    "Descricao do Produto",
-    "Produto/Descrição",
-    "Descrição",
-    "Descricao",
-  ]);
-  const pleiteante = by(["Pleiteante", "Empresa", "Requerente", "Solicitante"]);
-  const tipo = by(["Tipo de Pleito", "Tipo", "Pleito", "Pedido"]);
 
+  const ncm = by(["NCM", "Código NCM", "Codigo NCM", "Código", "Codigo", "NCM 8"]);
+  const produto = by(["Produto", "Descrição do Produto", "Descricao do Produto", "Descrição", "Descricao"]);
+  const pleiteante = by(["Pleiteante", "Requerente", "Solicitante", "Interessado"]);
+  const tipo = by(["Tipo de Pleito", "Tipo do Pleito", "Tipo"]);
   return { ncm, produto, pleiteante, tipo };
 }
 
 const HistoricoPautasPage: React.FC = () => {
-  const db = getFirestore();
   const nav = useNavigate();
-  const [carregando, setCarregando] = useState(true);
+  const db = getFirestore();
+
   const [itens, setItens] = useState<PautaItem[]>([]);
+  const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState("");
 
   useEffect(() => {
@@ -122,11 +116,18 @@ const HistoricoPautasPage: React.FC = () => {
             safeStr(p?.arquivo) ||
             "—";
 
-          const reuniao =
+          const reuniaoRaw =
             safeStr(p?.meeting) ||
             safeStr(p?.reuniao) ||
             safeStr(p?.titulo) ||
             "—";
+
+          // <<< ACRESCENTA “(RETIFICADA)” QUANDO COUBER >>>
+          const isRet =
+            !!(p?.diffResumo?.baseId || p?.isRetificadora) ||
+            /retificad/i.test(String(tituloArquivo)) ||
+            /retificad/i.test(String(reuniaoRaw));
+          const reuniao = `${reuniaoRaw}${isRet ? " (RETIFICADA)" : ""}`;
 
           const secoesArr = Array.isArray(p?.sections)
             ? p.sections
@@ -153,6 +154,11 @@ const HistoricoPautasPage: React.FC = () => {
             if (n8.length === 8 && ncmSet.has(n8)) cgim++;
           }
 
+          const cont = (p?.diffResumo && p.diffResumo.contagens) ? p.diffResumo.contagens : null;
+          const novos = cont?.novos ?? (Array.isArray(p?.novos) ? p.novos.length : undefined) ?? 0;
+          const alterados = cont?.alterados ?? 0;
+          const removidos = cont?.removidos ?? (Array.isArray(p?.removidos) ? p.removidos.length : undefined) ?? 0;
+
           list.push({
             id: p.id,
             tituloArquivo,
@@ -160,6 +166,9 @@ const HistoricoPautasPage: React.FC = () => {
             secoes: secoesArr.length,
             pleitos: pleitosTot,
             pleitosCgim: cgim,
+            novos,
+            alterados,
+            removidos,
           });
         }
 
@@ -179,53 +188,61 @@ const HistoricoPautasPage: React.FC = () => {
   const excluir = async (id: string) => {
     if (!confirm("Tem certeza que deseja excluir esta pauta?")) return;
     await deleteDoc(doc(db, "pautas", id));
-    setItens((prev) => prev.filter((p) => p.id !== id));
+    setItens((prev) => prev.filter((x) => x.id !== id));
   };
 
   return (
-    <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-semibold">Histórico de Pautas</h1>
+    <div className="p-4 md:p-6 lg:p-8 space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Histórico de Pautas</h1>
+          <div className="text-sm text-slate-600 mt-1">{total} itens</div>
+        </div>
+      </div>
 
-      {erro && <div className="p-3 border rounded bg-red-50 text-red-700">{erro}</div>}
+      {erro && <div className="p-4 rounded-xl border bg-red-50 text-red-800">{erro}</div>}
 
-      <div className="text-sm text-gray-600">Total: {total}</div>
-
-      <div className="border rounded-xl bg-white/70 overflow-auto">
+      <div className="rounded-2xl border bg-white shadow-sm overflow-x-auto">
         <table className="min-w-full text-sm">
           <thead>
-            <tr className="bg-gray-50 text-left">
-              <th className="p-3 font-medium">Arquivo</th>
+            <tr className="text-left text-slate-600">
               <th className="p-3 font-medium">Reunião</th>
+              <th className="p-3 font-medium">Arquivo</th>
               <th className="p-3 font-medium">Seções</th>
-              {/* Coluna “Tabelas” removida a pedido */}
               <th className="p-3 font-medium">Pleitos</th>
               <th className="p-3 font-medium">Pleitos CGIM</th>
+              <th className="p-3 font-medium">Novos</th>
+              <th className="p-3 font-medium">Alterados</th>
+              <th className="p-3 font-medium">Removidos</th>
               <th className="p-3 font-medium">Ações</th>
             </tr>
           </thead>
           <tbody>
             {carregando && (
               <tr>
-                <td className="p-3" colSpan={6}>
+                <td className="p-3" colSpan={9}>
                   Carregando…
                 </td>
               </tr>
             )}
             {!carregando && itens.length === 0 && (
               <tr>
-                <td className="p-3" colSpan={6}>
-                  Nenhuma pauta cadastrada.
+                <td className="p-3" colSpan={9}>
+                  Nenhuma pauta encontrada.
                 </td>
               </tr>
             )}
             {!carregando &&
               itens.map((it) => (
-                <tr key={it.id} className="border-t align-top">
-                  <td className="p-3">{safeStr(it.tituloArquivo)}</td>
-                  <td className="p-3">{safeStr(it.reuniao)}</td>
+                <tr key={it.id} className="border-t hover:bg-slate-50">
+                  <td className="p-3">{it.reuniao}</td>
+                  <td className="p-3">{it.tituloArquivo}</td>
                   <td className="p-3">{it.secoes}</td>
                   <td className="p-3">{it.pleitos}</td>
                   <td className="p-3">{it.pleitosCgim}</td>
+                  <td className="p-3">{it.novos ?? "—"}</td>
+                  <td className="p-3">{it.alterados ?? "—"}</td>
+                  <td className="p-3">{it.removidos ?? "—"}</td>
                   <td className="p-3">
                     <div className="flex gap-2">
                       <button

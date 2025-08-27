@@ -201,7 +201,10 @@ const RelatorioConsolidadoPage: React.FC = () => {
       const opts: PautaOption[] = [];
       snap.forEach((d) => {
         const v = d.data() as any;
-        const meeting = String(v?.meeting || v?.titulo || d.id || "");
+        const meetingRaw = String(v?.meeting || v?.titulo || d.id || "");
+        const fileTitle = String(v?.tituloArquivo || v?.fileName || "");
+        const isRet = !!(v?.diffResumo?.baseId || v?.isRetificadora) || /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
+        const meeting = `${meetingRaw}${isRet ? " (RETIFICADA)" : ""}`;
         opts.push({
           id: d.id,
           meeting,
@@ -389,8 +392,12 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
   const cabecalho: CabecalhoRelatorio = useMemo(() => {
     const sel = pautas.find((p) => p.id === pautaSel);
+    const meetingRaw = String(sel?.meeting || pautaDoc?.meeting || "");
+    const fileTitle = String((pautaDoc as any)?.tituloArquivo || "");
+    const isRet = !!((pautaDoc as any)?.diffResumo?.baseId || (pautaDoc as any)?.isRetificadora) || /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
+    const meetingLabel = `${meetingRaw}${isRet ? " (RETIFICADA)" : ""}`;
     const linhaTopo = "Ministério do Desenvolvimento, Indústria, Comércio e Serviços";
-    const blocoCompleto = `Relatório de Análises – CGIM – Pauta ${sel?.meeting || pautaDoc?.meeting || ""}`;
+    const blocoCompleto = `Relatório de Análises – CGIM – Pauta ${meetingLabel}`;
     const notas = 'Seções: "Análise Técnica" e "Sugestão CGIM"';
     return { linhaTopo, blocoCompleto, apenasCgim: notas };
   }, [pautaSel, pautas, pautaDoc]);
@@ -399,7 +406,13 @@ const RelatorioConsolidadoPage: React.FC = () => {
     await exportRelatorioDocx({
       cabecalho,
       itens: itensTS,
-      nomeArquivo: `Relatorio_CGIM_${pautaDoc?.meeting || pautaSel}.docx`,
+      nomeArquivo: (() => { 
+        const meetingRaw = String(pautaDoc?.meeting || pautaSel || "");
+        const fileTitle = String((pautaDoc as any)?.tituloArquivo || "");
+        const isRet = !!((pautaDoc as any)?.diffResumo?.baseId || (pautaDoc as any)?.isRetificadora) || /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
+        const meetingLabel = `${meetingRaw}${isRet ? " (RETIFICADA)" : ""}`;
+        return `Relatorio_CGIM_${meetingLabel}.docx`;
+      })(),
     });
   };
 
@@ -410,7 +423,13 @@ const RelatorioConsolidadoPage: React.FC = () => {
   const imprimirCompleto = () => {
     if (!itensBase.length) return;
 
-    const title = `Relatório Completo – ${pautaDoc?.meeting || pautaSel}`;
+    const title = (() => {
+      const meetingRaw = String(pautaDoc?.meeting || pautaSel || "");
+      const fileTitle = String((pautaDoc as any)?.tituloArquivo || "");
+      const isRet = !!((pautaDoc as any)?.diffResumo?.baseId || (pautaDoc as any)?.isRetificadora) || /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
+      const meetingLabel = `${meetingRaw}${isRet ? " (RETIFICADA)" : ""}`;
+      return `Relatório Completo – ${meetingLabel}`;
+    })();
     const css = `
       * { box-sizing: border-box; }
       body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 24px; color: #0f172a; }
@@ -520,7 +539,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
   };
 
   return (
-    <div className="p-4 md:p-8 max-w-[1100px] mx-auto">
+    <div className="p-4 md:p-8 w-full">
       {/* Cabeçalho em uma coluna */}
       <div className="mb-4">
         <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Relatório Consolidado</h1>
@@ -590,7 +609,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
         <div className="space-y-4">
           {/* Cards — SOMENTE Técnica + Sugestão */}
           {itensTS.map((it) => (
-            <div key={it.atribId || it.indice} className="rounded-xl border bg-white p-4">
+            <div key={`${it.atribId || it.indice}-${it.ncm}-${it.produto}`} className="rounded-xl border bg-white p-4">
               <div className="flex items-center justify-between">
                 <div className="text-lg font-semibold">
                   {it.indice}. NCM {it.ncm}

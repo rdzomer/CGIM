@@ -11,7 +11,15 @@ const Sidebar: React.FC = () => {
   const active = "bg-white shadow-sm text-indigo-700";
 
   return (
-    <aside className="hidden md:flex md:flex-col h-screen sticky top-0 w-[360px] border-r bg-white/70 backdrop-blur">
+    <aside
+      className="
+        hidden md:flex md:flex-col
+        h-screen sticky top-0
+        border-r bg-white/70 backdrop-blur
+        shrink-0 w-80 lg:w-[360px]
+      "
+      style={{ width: 360 }}
+    >
       <div className="p-6 border-b">
         <div className="text-2xl font-semibold tracking-tight">CGIM</div>
         <div className="mt-1 text-sm text-slate-600 truncate">{user?.nome || "Usuário"}</div>
@@ -69,7 +77,9 @@ const Sidebar: React.FC = () => {
         </NavLink>
       </nav>
 
-      <div className="mt-auto p-4 text-xs text-slate-400">© {new Date().getFullYear()} CGIM</div>
+      <div className="mt-auto p-4 text-xs text-slate-400">
+        © {new Date().getFullYear()} CGIM
+      </div>
     </aside>
   );
 };

@@ -20,6 +20,9 @@ import {
 
 import { useNavigate } from "react-router-dom";
 
+// >>> NOVO: serviço de versionamento/diff entre pautas
+import { diffPautas } from "../services/pautaVersioningCompat";
+
 // ---------------- ANALISTAS PADRÃO ----------------
 const ANALISTAS = [
   "Ricardo Zomer",
@@ -275,6 +278,15 @@ const PautaCatPage: React.FC = () => {
   const [historico, setHistorico] = useState<HistoricoItem[]>([]);
   const [currentPautaId, setCurrentPautaId] = useState<string | null>(null);
 
+  // >>> NOVO: DIF entre pautas
+  const [pautaBaseId, setPautaBaseId] = useState<string>("");
+  const [diffResumo, setDiffResumo] = useState<null | {
+    removidos: number;
+    alterados: number;
+    mantidos: number;
+    novos: number;
+  }>(null);
+
   // --- CGIM filter ---
   const [somenteCgim, setSomenteCgim] = useState<boolean>(true); // <- ATIVO POR PADRÃO
   const [ncmSet, setNcmSet] = useState<Set<string>>(new Set());
@@ -317,8 +329,8 @@ const PautaCatPage: React.FC = () => {
 
   // abrir automaticamente a pauta mais recente ao entrar na página
   useEffect(() => {
-    if (currentPautaId) return;            // já existe aberta
-    if (!historico.length) return;         // histórico ainda não carregado
+    if (currentPautaId) return; // já existe aberta
+    if (!historico.length) return; // histórico ainda não carregado
     (async () => {
       try {
         const latest = historico[0];
@@ -327,7 +339,7 @@ const PautaCatPage: React.FC = () => {
         setStats(full.stats || null);
         setCurrentPautaId(latest.id);
         setFirestoreBadge(null);
-        setSomenteCgim(true);              // garante filtro ativo
+        setSomenteCgim(true); // garante filtro ativo
       } catch {
         // silencioso
       }
@@ -372,6 +384,24 @@ const PautaCatPage: React.FC = () => {
           ...h,
         ].slice(0, 5)
       );
+
+      // >>> NOVO: aplica diff se houve pauta base informada
+      try {
+        if (pautaBaseId && pautaBaseId !== pautaId) {
+          const resumo = await diffPautas(pautaBaseId, pautaId, { aplicarMarcacoes: true });
+          if (resumo?.contagens) {
+            setDiffResumo(resumo.contagens);
+            toast.success(
+              `Diferenças aplicadas: ${resumo.contagens.removidos} removidos, ${resumo.contagens.alterados} alterados, ${resumo.contagens.novos} novos.`
+            );
+          }
+        } else {
+          setDiffResumo(null);
+        }
+      } catch (e) {
+        console.error(e);
+        toast.error("Falha ao comparar pautas (diff).");
+      }
     } else {
       setFirestoreBadge("dup");
       setDupInfo({ fileName: file.name, buf });
@@ -401,7 +431,6 @@ const PautaCatPage: React.FC = () => {
     if (!dupInfo) return;
     try {
       const buf = dupInfo.buf;
-      const name = dupInfo.fileName.toLowerCase();
 
       let meeting: string | null = null;
       let novo: { secoes: Secao[]; stats: Stats };
@@ -438,6 +467,24 @@ const PautaCatPage: React.FC = () => {
               : p
           )
         );
+
+        // >>> NOVO: aplica diff após regravar, se houver pauta base
+        try {
+          if (pautaBaseId && pautaBaseId !== id) {
+            const resumo = await diffPautas(pautaBaseId, id, { aplicarMarcacoes: true });
+            if (resumo?.contagens) {
+              setDiffResumo(resumo.contagens);
+              toast.success(
+                `Diferenças aplicadas: ${resumo.contagens.removidos} removidos, ${resumo.contagens.alterados} alterados, ${resumo.contagens.novos} novos.`
+              );
+            }
+          } else {
+            setDiffResumo(null);
+          }
+        } catch (e) {
+          console.error(e);
+          toast.error("Falha ao comparar pautas (diff).");
+        }
       } else {
         toast.error("Hash não encontrado para sobrescrever.");
       }
@@ -571,6 +618,24 @@ const PautaCatPage: React.FC = () => {
         <p className="mb-2">
           Importe o arquivo da pauta em <b>.html</b> (exportado do SEI).
         </p>
+
+        {/* >>> NOVO: campo para informar a pauta base (ID) e mostrar o resumo do diff */}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <label className="text-sm text-slate-700">Pauta base (ID):</label>
+          <input
+            className="border rounded px-2 py-1"
+            placeholder="ID da pauta original (ex.: abc123)"
+            value={pautaBaseId}
+            onChange={(e) => setPautaBaseId(e.target.value)}
+            style={{ minWidth: 260 }}
+          />
+          {diffResumo && (
+            <span className="px-2 py-1 text-xs rounded bg-blue-50 text-blue-800 border border-blue-200">
+              Δ {diffResumo.novos} novos · {diffResumo.alterados} alterados · {diffResumo.removidos} removidos · {diffResumo.mantidos} mantidos
+            </span>
+          )}
+        </div>
+
         <div className="flex flex-wrap items-center gap-3">
           <input
             ref={inputRef}
@@ -640,15 +705,13 @@ const PautaCatPage: React.FC = () => {
       <div className="mb-6 p-4 bg-white rounded border">
         <div className="flex items-center justify-between mb-2">
           <h2 className="font-semibold">Histórico (últimas 5 pautas)</h2>
-<button
-  type="button"
-  onClick={() => navigate("/historico")}
-  className="text-sm text-blue-600 hover:underline"
->
-  ver tudo
-</button>
-
-
+          <button
+            type="button"
+            onClick={() => navigate("/historico")}
+            className="text-sm text-blue-600 hover:underline"
+          >
+            ver tudo
+          </button>
         </div>
 
         {historico.length === 0 ? (

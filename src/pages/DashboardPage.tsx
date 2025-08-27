@@ -101,6 +101,38 @@ function projectLinha(row: PleitoRow) {
   };
 }
 
+/** Constrói a pleitoKey a partir da linha quando não há "key"/"id" explícitos. */
+function tryMakeKeyFromRow(row: PleitoRow): string {
+  const { ncm, produto, pleiteante } = projectLinha(row);
+  const n8 = onlyDigits(ncm).slice(0, 8);
+  try {
+    const k = gerarPleitoKey({ NCM: n8, Produto: produto || "", Pleiteante: pleiteante || "" });
+    if (k) return String(k);
+  } catch {}
+  return `${n8}|${normKey(produto)}|${normKey(pleiteante)}`;
+}
+
+/** Busca, para cada pauta base (baseId), o conjunto de pleitoKeys removidos por retificadoras. */
+async function getRemovedKeysByBaseIds(db: any, baseIds: string[]): Promise<Record<string, Set<string>>> {
+  const out: Record<string, Set<string>> = {};
+  const uniq = Array.from(new Set(baseIds.filter(Boolean)));
+  for (const baseId of uniq) {
+    try {
+      const snap = await getDocs(query(collection(db, "pautas"), where("diffResumo.baseId", "==", baseId)));
+      const set = (out[baseId] = out[baseId] || new Set<string>());
+      snap.forEach((d) => {
+        const p = d.data() as any;
+        const arr: any[] = Array.isArray((p as any)?.removidos) ? (p as any).removidos : [];
+        for (const r of arr) {
+          const key = String((r as any)?.pleitoKey || tryMakeKeyFromRow(r));
+          if (key) set.add(key);
+        }
+      });
+    } catch {}
+  }
+  return out;
+}
+
 const ANALISTAS_FIXOS = ["Todos","Pedro Reckziegel","Ricardo Zomer","Antonio Azambuja"] as const;
 const STATUS_OPCOES = ["Todos", "Novo", "Em Análise", "Concluído"] as const;
 
@@ -122,7 +154,6 @@ function statusMatchesFiltro(statusRaw: string | undefined, filtro: typeof STATU
 
 function rowStyleByStatus(statusRaw?: string) {
   const n = normalizeStatus(statusRaw);
-  // Fundo e borda lateral esquerda para aumentar a visibilidade
   if (n === "concluido") return "bg-green-50 border-l-4 border-l-green-400";
   if (n === "em_analise") return "bg-blue-50 border-l-4 border-l-blue-300";
   return "bg-white border-l-4 border-l-gray-200";
@@ -175,6 +206,9 @@ const DashboardPage: React.FC = () => {
         pautas.sort((a, b) => toMillis(b.createdAt || b.criadoEm) - toMillis(a.createdAt || a.criadoEm));
         const pautaIds = pautas.slice(0, 5).map((p) => p.id);
 
+        // 2.1) Carrega chaves removidas por retificadoras das pautas-base listadas
+        const removedByBase = await getRemovedKeysByBaseIds(db, pautaIds);
+
         // 3) Linhas CGIM
         const allPleitos: PleitoBase[] = [];
         for (const pautaId of pautaIds) {
@@ -188,11 +222,18 @@ const DashboardPage: React.FC = () => {
               const n8 = onlyDigits(ncm).slice(0, 8);
               const aceita = flags || (!hasNcm ? true : (n8.length === 8 && ncmSet.has(n8)));
               if (!aceita) return;
-              const key = r?.key || r?.id || gerarPleitoKey({ NCM: n8, Produto: produto || "", Pleiteante: pleiteante || "" }) || `${pautaId}:${si}:${ri}`;
+
+              // chave do pleito
+              const keyRaw = r?.key || r?.id || tryMakeKeyFromRow(r);
+              const key = String(keyRaw || `${pautaId}:${si}:${ri}`);
+
+              // se a pauta base tiver retificadora que removeu este pleito, não incluir
+              if (removedByBase[pautaId]?.has(key)) return;
+
               allPleitos.push({
-                id: String(key),
+                id: key,
                 pautaId,
-                pleitoKey: String(key),
+                pleitoKey: key,
                 ncm: n8,
                 produto,
                 pleiteante,
@@ -202,6 +243,8 @@ const DashboardPage: React.FC = () => {
             });
           });
         }
+
+        // 3.1) dedupe preferindo o que veio primeiro (ordem já é da pauta mais recente para a mais antiga)
         const uniq = new Map<string, PleitoBase>();
         for (const p of allPleitos) if (!uniq.has(p.pleitoKey)) uniq.set(p.pleitoKey, p);
         const pleitosFinal = Array.from(uniq.values()).sort((a, b) => {
@@ -371,7 +414,7 @@ const DashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Tabela — agora COM a coluna Status e linhas coloridas por status */}
+        {/* Tabela — com Status e linhas coloridas por status */}
         <div className="border rounded-xl bg-white/70 overflow-auto">
           <table className="min-w-full text-sm">
             <thead>
@@ -399,8 +442,7 @@ const DashboardPage: React.FC = () => {
                     <td className="p-3">{it.pleiteante || "—"}</td>
                     <td className="p-3">{it.tipoPleito || "—"}</td>
                     <td className="p-3">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
-                        bg-white/60 border">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-white/60 border">
                         {displayStatus(it.status)}
                       </span>
                     </td>

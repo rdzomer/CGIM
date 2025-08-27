@@ -86,6 +86,8 @@ const toMillis = (t: any): number => {
   if (typeof t === "number") return t;
   if (t instanceof Date) return t.getTime();
   if (typeof t?.toMillis === "function") return t.toMillis();
+  if (t?.toDate) return t.toDate().getTime?.() || 0;
+  if (t?.seconds) return t.seconds * 1000 + (t.nanoseconds || 0) / 1e6;
   return 0;
 };
 
@@ -170,19 +172,53 @@ function flattenPleitosFromPauta(pauta: PautaDoc) {
     : Array.isArray(pauta?.sections)
     ? pauta.sections
     : [];
+
   for (const sec of secoes) {
     const secTitle = renderStr(sec?.title ?? sec?.titulo ?? "", "");
-    if (Array.isArray(sec?.rows)) sec.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
-    if (Array.isArray(sec?.tabelas))
-      for (const tb of sec.tabelas)
-        if (Array.isArray(tb?.rows)) tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
-    if (Array.isArray(sec?.pleitos)) sec.pleitos.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
-    if (Array.isArray(sec?.itens)) sec.itens.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+
+    // rows
+    if (Array.isArray(sec?.rows)) {
+      for (const r of sec.rows) out.push({ ...r, __sec: secTitle });
+    }
+
+    // tabelas
+    if (Array.isArray((sec as any)?.tabelas)) {
+      for (const tb of (sec as any).tabelas) {
+        if (Array.isArray(tb?.rows)) {
+          for (const r of tb.rows) out.push({ ...r, __sec: secTitle });
+        }
+      }
+    }
+
+    // tables
+    if (Array.isArray((sec as any)?.tables)) {
+      for (const tb of (sec as any).tables) {
+        if (Array.isArray(tb?.rows)) {
+          for (const r of tb.rows) out.push({ ...r, __sec: secTitle });
+        }
+      }
+    }
+
+    // pleitos
+    if (Array.isArray((sec as any)?.pleitos)) {
+      for (const r of (sec as any).pleitos) out.push({ ...r, __sec: secTitle });
+    }
   }
-  if (Array.isArray(pauta?.tabelas))
-    for (const tb of pauta.tabelas)
-      if (Array.isArray(tb?.rows)) tb.rows.forEach((r: any) => out.push({ ...r, __sec: "" }));
-  if (Array.isArray(pauta?.pleitos)) pauta.pleitos.forEach((r: any) => out.push({ ...r, __sec: "" }));
+
+  // pauta.tabelas
+  if (Array.isArray((pauta as any)?.tabelas)) {
+    for (const tb of (pauta as any).tabelas) {
+      if (Array.isArray(tb?.rows)) {
+        for (const r of tb.rows) out.push({ ...r, __sec: "" });
+      }
+    }
+  }
+
+  // pauta.pleitos
+  if (Array.isArray((pauta as any)?.pleitos)) {
+    for (const r of (pauta as any).pleitos) out.push({ ...r, __sec: "" });
+  }
+
   return out;
 }
 
@@ -204,6 +240,27 @@ async function getPautasByIdsCached(db: any, ids: string[]): Promise<Record<stri
         out[d.id] = v;
       });
     }
+  }
+  return out;
+}
+
+/** Retorna, para cada pauta base, o conjunto de pleitoKeys removidos por retificadoras. */
+async function getRemovedKeysByBaseIds(db: any, baseIds: string[]): Promise<Record<string, Set<string>>> {
+  const out: Record<string, Set<string>> = {};
+  const uniq = Array.from(new Set(baseIds.filter(Boolean)));
+  for (const baseId of uniq) {
+    try {
+      const snap = await getDocs(query(collection(db, "pautas"), where("diffResumo.baseId", "==", baseId)));
+      const set = (out[baseId] = out[baseId] || new Set<string>());
+      snap.forEach((d) => {
+        const p = d.data() as any;
+        const arr: any[] = Array.isArray((p as any)?.removidos) ? (p as any).removidos : [];
+        for (const r of arr) {
+          const key = String((r as any)?.pleitoKey || tryMakeKeyFromRow(r));
+          if (key) set.add(key);
+        }
+      });
+    } catch {}
   }
   return out;
 }
@@ -411,6 +468,28 @@ const MinhasTarefasPage: React.FC = () => {
           }
         }
 
+        // 3.1) marca tarefas cujo pleito foi RETIRADO por retificação
+        try {
+          const baseIds = Array.from(new Set(merged.map((t) => t.pautaId).filter(Boolean))) as string[];
+          const removedByBase = await getRemovedKeysByBaseIds(db, baseIds);
+          const keyFor = (t: Atribuicao) => {
+            const k = String(t.pleitoKey || "");
+            if (k) return k;
+            const n8 = onlyDigits(t.ncm).slice(0, 8);
+            try {
+              return String(gerarPleitoKey({ NCM: n8, Produto: t.produto || "", Pleiteante: t.pleiteante || "" }));
+            } catch {}
+            return `${n8}|${normKey(t.produto || "")}|${normKey(t.pleiteante || "")}`;
+          };
+          for (const t of merged) {
+            const baseId = String(t.pautaId || "");
+            const k = keyFor(t);
+            if (baseId && k && removedByBase[baseId]?.has(k)) {
+              (t as any).__retirado = true;
+            }
+          }
+        } catch {}
+
         // 4) ordenação
         merged.sort((a, b) => {
           const rank = (s?: string) => {
@@ -459,7 +538,7 @@ const MinhasTarefasPage: React.FC = () => {
   );
   const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"];
 
-  // ====== ação: reaproveitar análise ======
+  // ====== ações ======
   function openAnalyse(t: Atribuicao) {
     const atrId = t.id || makeAtribuicaoId(t.pleitoKey || "");
     const url = `/analise/${encodeURIComponent(atrId)}`;
@@ -478,7 +557,7 @@ const MinhasTarefasPage: React.FC = () => {
     nav(url);
   }
 
-  // ====== UI helpers (somente aparência) ======
+  // ====== UI helpers ======
   const statusBadge = (s?: string) => {
     const n = normalizeStatus(s);
     const map: Record<string, string> = {
@@ -559,9 +638,8 @@ const MinhasTarefasPage: React.FC = () => {
         </div>
       </div>
 
-      {/* ====== Cards (mudança apenas de aparência; mesma navegação/ações) ====== */}
+      {/* Cards */}
       <div className="w-full">
-        {/* carregando */}
         {loading && (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -570,14 +648,12 @@ const MinhasTarefasPage: React.FC = () => {
           </div>
         )}
 
-        {/* vazio */}
         {!loading && tarefas.length === 0 && (
           <div className="rounded-xl border bg-white/70 p-6 text-gray-600">
             Nenhuma tarefa atribuída a você.
           </div>
         )}
 
-        {/* lista de cards */}
         {!loading && tarefas.length > 0 && (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
             {tarefas.map((t) => {
@@ -604,6 +680,11 @@ const MinhasTarefasPage: React.FC = () => {
                       <div className="mt-0.5 font-semibold truncate">{renderStr(t.produto)}</div>
                     </div>
                     {statusBadge(t.status)}
+                    {(t as any).__retirado ? (
+                      <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-800 border border-rose-200">
+                        Retirado (retificação)
+                      </span>
+                    ) : null}
                   </div>
 
                   {/* Infos principais */}
