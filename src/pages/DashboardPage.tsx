@@ -7,6 +7,8 @@ import {
   getDocs,
   query,
   where,
+  DocumentData,
+  Query,
 } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, User as FBUser } from "firebase/auth";
 import {
@@ -20,12 +22,14 @@ import {
 import { getNcmSetCgim } from "../services/ncmsService";
 import { makeAtribuicaoId, gerarPleitoKey } from "../services/atribuicoesService";
 
+/* ==================== Tipos ==================== */
 type MiniUser = { uid?: string; email?: string; nome?: string } | null;
 type PleitoRow = Record<string, any>;
 
 type PleitoBase = {
-  id: string;                // id sintético
-  pautaId: string;
+  id: string;
+  pautaId: string;    // id da pauta (doc carregado)
+  baseId: string;     // id da pauta base para esta linha
   pleitoKey: string;
   ncm?: string;
   produto?: string;
@@ -40,7 +44,7 @@ type Atrib = {
   responsavelNome?: string;
   analistaNome?: string;
   status?: string;
-  analise?: { sugestao?: string } | null;
+  analise?: { resumo?: string; comercio?: string; tecnica?: string; sugestao?: string } | null;
   ncm?: string;
   produto?: string;
   pleiteante?: string;
@@ -49,8 +53,8 @@ type Atrib = {
   updatedAt?: any;
 };
 
-// ---- helpers ----
-const norm = (s?: string) => (s || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
+/* ==================== Helpers ==================== */
+const norm = (s?: string) => (s || "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 const normKey = (s?: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const onlyDigits = (s?: string) => (s || "").replace(/\D+/g, "");
 const toMillis = (t: any): number => {
@@ -73,7 +77,7 @@ const displayStatus = (raw?: string) => {
   return "Novo";
 };
 
-// Mapeia chaves de uma linha arbitrária -> {NCM, Produto, Pleiteante, Tipo de Pleito}
+// headers flexíveis
 function pickKey(row: PleitoRow, candidates: string[]): string | undefined {
   const keys = Object.keys(row || {});
   for (const cand of candidates) {
@@ -89,7 +93,7 @@ function pickKey(row: PleitoRow, candidates: string[]): string | undefined {
 }
 
 function projectLinha(row: PleitoRow) {
-  const kNcm = pickKey(row, ["NCM","Código NCM","Codigo NCM","Código","Codigo","NCM 8"]);
+  const kNcm  = pickKey(row, ["NCM","Código NCM","Codigo NCM","Código","Codigo","NCM 8"]);
   const kProd = pickKey(row, ["Produto","Descrição do Produto","Descricao do Produto","Produto/Descrição","Descrição","Descricao"]);
   const kPlt  = pickKey(row, ["Pleiteante","Empresa","Requerente","Solicitante"]);
   const kTipo = pickKey(row, ["Tipo de Pleito","Tipo","Pleito","Pedido"]);
@@ -101,7 +105,7 @@ function projectLinha(row: PleitoRow) {
   };
 }
 
-/** Constrói a pleitoKey a partir da linha quando não há "key"/"id" explícitos. */
+/** Constrói pleitoKey quando a linha não traz `key` explícita */
 function tryMakeKeyFromRow(row: PleitoRow): string {
   const { ncm, produto, pleiteante } = projectLinha(row);
   const n8 = onlyDigits(ncm).slice(0, 8);
@@ -112,8 +116,8 @@ function tryMakeKeyFromRow(row: PleitoRow): string {
   return `${n8}|${normKey(produto)}|${normKey(pleiteante)}`;
 }
 
-/** Busca, para cada pauta base (baseId), o conjunto de pleitoKeys removidos por retificadoras. */
-async function getRemovedKeysByBaseIds(db: any, baseIds: string[]): Promise<Record<string, Set<string>>> {
+/** Busca removedos por **baseId** (não por id da retificadora) */
+async function getRemovedByBaseIds(db: any, baseIds: string[]): Promise<Record<string, Set<string>>> {
   const out: Record<string, Set<string>> = {};
   const uniq = Array.from(new Set(baseIds.filter(Boolean)));
   for (const baseId of uniq) {
@@ -139,8 +143,7 @@ const STATUS_OPCOES = ["Todos", "Novo", "Em Análise", "Concluído"] as const;
 function nomeMatchesFiltro(nome: string | undefined | null, filtro: typeof ANALISTAS_FIXOS[number]) {
   if (!nome) return false;
   if (filtro === "Todos") return true;
-  const a = normKey(nome);
-  const b = normKey(filtro);
+  const a = normKey(nome); const b = normKey(filtro);
   return a === b || a.replace("antonio","antônio") === b || a.replace("antônio","antonio") === b;
 }
 
@@ -149,7 +152,7 @@ function statusMatchesFiltro(statusRaw: string | undefined, filtro: typeof STATU
   const n = normalizeStatus(statusRaw);
   if (filtro === "Concluído") return n === "concluido";
   if (filtro === "Em Análise") return n === "em_analise";
-  return n === "nao_iniciado"; // "Novo"
+  return n === "nao_iniciado";
 }
 
 function rowStyleByStatus(statusRaw?: string) {
@@ -159,7 +162,7 @@ function rowStyleByStatus(statusRaw?: string) {
   return "bg-white border-l-4 border-l-gray-200";
 }
 
-// ---- auth hook ----
+/* ==================== Auth ==================== */
 function useCurrentUser(): { loading: boolean; user: MiniUser } {
   const [state, setState] = useState<{ loading: boolean; user: MiniUser }>({ loading: true, user: null });
   useEffect(() => {
@@ -172,6 +175,7 @@ function useCurrentUser(): { loading: boolean; user: MiniUser } {
   return state;
 }
 
+/* ==================== Página ==================== */
 const DashboardPage: React.FC = () => {
   const db = getFirestore();
   const nav = useNavigate();
@@ -187,6 +191,7 @@ const DashboardPage: React.FC = () => {
 
   const [pleitos, setPleitos] = useState<PleitoBase[]>([]);
   const [atribs, setAtribs] = useState<Atrib[]>([]);
+  const [historicoCount, setHistoricoCount] = useState<number>(0);
 
   useEffect(() => {
     if (authLoading) return;
@@ -194,29 +199,47 @@ const DashboardPage: React.FC = () => {
       setCarregando(true);
       setErro("");
       try {
-        // 1) NCMs
+        // 1) NCMs CGIM
         let ncmSet: Set<string> = new Set();
         try { ncmSet = await getNcmSetCgim(); } catch { ncmSet = new Set(); }
         const hasNcm = ncmSet.size > 0;
         setAvisoNcm(hasNcm ? "" : "Aviso: NCMs CGIM não configuradas. Exibindo pleitos detectados sem filtrar por NCM.");
 
-        // 2) Pautas recentes
-        const snap = await getDocs(collection(db, "pautas"));
-        const pautas = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-        pautas.sort((a, b) => toMillis(b.createdAt || b.criadoEm) - toMillis(a.createdAt || a.criadoEm));
-        const pautaIds = pautas.slice(0, 5).map((p) => p.id);
+        // 2) Carrega pautas e descobre a **última versão por baseId**
+        const snapP = await getDocs(collection(db, "pautas"));
+        const pautasAll = snapP.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+        pautasAll.sort((a, b) => toMillis(b.createdAt || b.criadoEm) - toMillis(a.createdAt || a.criadoEm));
 
-        // 2.1) Carrega chaves removidas por retificadoras das pautas-base listadas
-        const removedByBase = await getRemovedKeysByBaseIds(db, pautaIds);
+        // group by baseId (baseId do diffResumo, ou o próprio id se não for retificadora)
+        const byBase = new Map<string, any[]>();
+        for (const p of pautasAll) {
+          const baseId = (p?.diffResumo?.baseId as string) || p.id;
+          const list = byBase.get(baseId) || [];
+          list.push(p);
+          byBase.set(baseId, list);
+        }
 
-        // 3) Linhas CGIM
+        // pega a última versão de cada baseId
+        const latestByBase: any[] = [];
+        const baseIds: string[] = [];
+        byBase.forEach((arr, baseId) => {
+          arr.sort((a: any, b: any) => toMillis(b.createdAt || b.criadoEm) - toMillis(a.createdAt || a.criadoEm));
+          latestByBase.push(arr[0]);
+          baseIds.push(baseId);
+        });
+
+        // 3) chaves removidas por retificadoras (por baseId)
+        const removedByBase = await getRemovedByBaseIds(db, baseIds);
+
+        // 4) Monta lista de pleitos SOMENTE da última versão de cada baseId
         const allPleitos: PleitoBase[] = [];
-        for (const pautaId of pautaIds) {
-          const d = pautas.find((p) => p.id === pautaId)!;
-          const sections: any[] = Array.isArray(d?.sections) ? d.sections : Array.isArray(d?.secoes) ? d.secoes : [];
-          sections.forEach((sec, si) => {
+        for (const p of latestByBase) {
+          const pautaId = p.id;
+          const baseId = (p?.diffResumo?.baseId as string) || p.id;
+          const sections: any[] = Array.isArray(p?.sections) ? p.sections : (Array.isArray(p?.secoes) ? p.secoes : []);
+          sections.forEach((sec: any, si: number) => {
             const rows: PleitoRow[] = Array.isArray(sec?.rows) ? sec.rows : [];
-            rows.forEach((r, ri) => {
+            rows.forEach((r: any, ri: number) => {
               const { ncm, produto, pleiteante, tipo } = projectLinha(r);
               const flags = r?.cgim === true || r?.isCGIM === true || r?.pertenceCGIM === true || r?.inCGIMScope === true;
               const n8 = onlyDigits(ncm).slice(0, 8);
@@ -227,12 +250,13 @@ const DashboardPage: React.FC = () => {
               const keyRaw = r?.key || r?.id || tryMakeKeyFromRow(r);
               const key = String(keyRaw || `${pautaId}:${si}:${ri}`);
 
-              // se a pauta base tiver retificadora que removeu este pleito, não incluir
-              if (removedByBase[pautaId]?.has(key)) return;
+              // se esta *base* tem retificadoras que removeram este pleito, não incluir
+              if (removedByBase[baseId]?.has(key)) return;
 
               allPleitos.push({
                 id: key,
                 pautaId,
+                baseId,
                 pleitoKey: key,
                 ncm: n8,
                 produto,
@@ -244,7 +268,7 @@ const DashboardPage: React.FC = () => {
           });
         }
 
-        // 3.1) dedupe preferindo o que veio primeiro (ordem já é da pauta mais recente para a mais antiga)
+        // 4.1) dedupe entre bases por pleitoKey (não deve ocorrer, mas garantimos)
         const uniq = new Map<string, PleitoBase>();
         for (const p of allPleitos) if (!uniq.has(p.pleitoKey)) uniq.set(p.pleitoKey, p);
         const pleitosFinal = Array.from(uniq.values()).sort((a, b) => {
@@ -253,19 +277,19 @@ const DashboardPage: React.FC = () => {
           return (a.produto || "").localeCompare(b.produto || "");
         });
 
-        // 4) Atribuições (com filtro de analista, se houver)
+        // 5) Atribuições (com filtro de analista, sem perder nada)
         let atribsAll: Atrib[] = [];
         if (analistaFiltro === "Todos") {
           const s = await getDocs(collection(db, "atribuicoes"));
           atribsAll = s.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
         } else {
           const col = collection(db, "atribuicoes");
-          const queriesArr = [
+          const qs: Query<DocumentData>[] = [
             query(col, where("analistaNome", "==", analistaFiltro)),
             query(col, where("atribuido.nome", "==", analistaFiltro)),
             query(col, where("responsavelNome", "==", analistaFiltro)),
           ];
-          const results = await Promise.all(queriesArr.map((q) => getDocs(q)));
+          const results = await Promise.all(qs.map((q) => getDocs(q)));
           const tmp: Atrib[] = [];
           results.forEach((snap) => snap.forEach((d) => tmp.push({ id: d.id, ...(d.data() as any) })));
           const uniqA = new Map<string, Atrib>(); tmp.forEach((a) => uniqA.set(a.id, a));
@@ -275,6 +299,19 @@ const DashboardPage: React.FC = () => {
 
         setPleitos(pleitosFinal);
         setAtribs(atribsAll);
+
+        // 6) Histórico dinâmico: análises concluídas cuja `pleitoKey` **não** está na pauta ativa
+        const currentKeys = new Set(pleitosFinal.map((p) => p.pleitoKey));
+        let historico = 0;
+        for (const a of atribsAll) {
+          const k = String(a.pleitoKey || "").trim();
+          if (!k) continue;
+          const concl = normalizeStatus(a.status) === "concluido";
+          const temAnalise = !!(a?.analise?.tecnica || a?.analise?.sugestao || a?.analise?.resumo || a?.analise?.comercio);
+          if (concl && temAnalise && !currentKeys.has(k)) historico++;
+        }
+        setHistoricoCount(historico);
+
       } catch (e: any) {
         console.error(e);
         setErro(e?.message || "Falha ao carregar dados do Dashboard.");
@@ -284,7 +321,7 @@ const DashboardPage: React.FC = () => {
     })();
   }, [authLoading, analistaFiltro, db]);
 
-  // JOIN + status/sugestão
+  /* ==================== JOIN + filtros ==================== */
   const itens = useMemo(() => {
     const byKey = new Map<string, Atrib>();
     for (const a of atribs) {
@@ -293,7 +330,7 @@ const DashboardPage: React.FC = () => {
       const prev = byKey.get(k);
       if (!prev || toMillis(a.updatedAt) > toMillis(prev?.updatedAt)) byKey.set(k, a);
     }
-    // mapa base
+
     let base = pleitos.map((p) => {
       const at = byKey.get(p.pleitoKey) || null;
       const analista = at?.responsavelNome || at?.analistaNome || (at as any)?.atribuido?.nome || "";
@@ -302,21 +339,15 @@ const DashboardPage: React.FC = () => {
       return { ...p, analista, sugestao, status, _atr: at };
     });
 
-    // filtro por analista
-    base = base.filter((it) => analistaFiltro === "Todos" ? true : nomeMatchesFiltro(it.analista, analistaFiltro));
-
-    // filtro por status (via select)
+    // filtros existentes
+    base = base.filter((it) => (analistaFiltro === "Todos" ? true : nomeMatchesFiltro(it.analista, analistaFiltro)));
     base = base.filter((it) => statusMatchesFiltro(it.status, statusFiltro));
-
-    // filtro rápido "somente concluídos"
-    if (somenteConcluidos) {
-      base = base.filter((it) => normalizeStatus(it.status) === "concluido");
-    }
+    if (somenteConcluidos) base = base.filter((it) => normalizeStatus(it.status) === "concluido");
 
     return base;
   }, [pleitos, atribs, analistaFiltro, statusFiltro, somenteConcluidos]);
 
-  // ====== resumo + gráfico (mantidos) ======
+  /* ==================== Resumo + gráfico ==================== */
   const resumo = useMemo(() => {
     const acc = { nao_iniciado: 0, em_analise: 0, concluido: 0 };
     for (const it of itens) acc[normalizeStatus(it.status) as keyof typeof acc] += 1;
@@ -333,6 +364,7 @@ const DashboardPage: React.FC = () => {
   );
   const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"];
 
+  /* ==================== Render ==================== */
   return (
     <div className="p-6">
       <div className="w-full space-y-6">
@@ -380,8 +412,8 @@ const DashboardPage: React.FC = () => {
         {avisoNcm && <div className="p-3 border rounded-xl bg-amber-50 text-amber-800">{avisoNcm}</div>}
         {erro && <div className="p-3 border rounded-xl bg-red-50 text-red-700">{erro}</div>}
 
-        {/* Cards + gráfico de status */}
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+        {/* Cards + gráfico */}
+        <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
           <div className="p-4 border rounded-xl bg-white/70">
             <div className="text-sm text-gray-500">Total</div>
             <div className="text-3xl font-semibold">{itens.length}</div>
@@ -397,6 +429,18 @@ const DashboardPage: React.FC = () => {
           <div className="p-4 border rounded-xl bg-white/70">
             <div className="text-sm text-gray-500">Concluído</div>
             <div className="text-3xl font-semibold">{resumo.concluido}</div>
+          </div>
+          {/* Histórico dinâmico */}
+          <div className="p-4 border rounded-xl bg-white/70">
+            <div className="text-sm text-gray-500">Histórico (pleitoKey)</div>
+            <div className="text-3xl font-semibold">{historicoCount}</div>
+            <button
+              className="mt-3 px-3 py-1.5 rounded border text-sm hover:bg-gray-50"
+              onClick={() => nav("/minhas-tarefas")}
+              title="Abrir Minhas Tarefas para reaproveitar histórico"
+            >
+              Reaproveitar análises
+            </button>
           </div>
         </div>
 
@@ -414,7 +458,7 @@ const DashboardPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Tabela — com Status e linhas coloridas por status */}
+        {/* Tabela */}
         <div className="border rounded-xl bg-white/70 overflow-auto">
           <table className="min-w-full text-sm">
             <thead>

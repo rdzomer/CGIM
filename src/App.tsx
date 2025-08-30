@@ -11,6 +11,7 @@ import RelatorioConsolidadoPage from "./pages/RelatorioConsolidadoPage";
 import LoginPage from "./pages/LoginPage";
 import { useAuth } from "./contexts/AuthContext";
 import PautaCatPage from "./pages/PautaCatPage"; // ✅ sua página robusta de extração
+import NcmSearchPage from "./pages/NcmSearchPage"; // ✅ NOVO
 
 const Private: React.FC<React.PropsWithChildren> = ({ children }) => {
   const { user, loading } = useAuth();
@@ -92,8 +93,19 @@ const App: React.FC = () => {
           }
         />
 
+        {/* ✅ NOVO: Consulta NCM */}
         <Route
-          path="/configuracoes"
+          path="/consulta-ncm"
+          element={
+            <Private>
+              <AppShell>
+                <NcmSearchPage />
+              </AppShell>
+            </Private>
+          }
+        />
+
+        <Route path="/configuracoes"
           element={
             <Private>
               <AppShell>

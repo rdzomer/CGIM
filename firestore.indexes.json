@@ -1,0 +1,39 @@
+{
+  "indexes": [
+    {
+      "collectionId": "atribuicoes",
+      "fields": [
+        { "fieldPath": "ncm", "order": "ASCENDING" },
+        { "fieldPath": "updatedAt", "order": "DESCENDING" },
+        { "fieldPath": "__name__", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionId": "historicoAnalises",
+      "fields": [
+        { "fieldPath": "ncm", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" },
+        { "fieldPath": "__name__", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "historicoAnalises",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ncm", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" },
+        { "fieldPath": "__name__", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "pleitos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ncm", "order": "ASCENDING" },
+        { "fieldPath": "updatedAt", "order": "DESCENDING" },
+        { "fieldPath": "__name__", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

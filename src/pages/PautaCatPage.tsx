@@ -20,7 +20,7 @@ import {
 
 import { useNavigate } from "react-router-dom";
 
-// >>> NOVO: serviço de versionamento/diff entre pautas
+// >>> serviço de versionamento/diff entre pautas
 import { diffPautas } from "../services/pautaVersioningCompat";
 
 // ---------------- ANALISTAS PADRÃO ----------------
@@ -92,19 +92,17 @@ function decodeHtmlBest(buf: ArrayBuffer): string {
   return sUtf < sIso ? utf : iso;
 }
 
-// ===== extrairMeeting ATUALIZADA (captura a frase completa) =====
+// ===== extrairMeeting (captura a frase completa) =====
 function extrairMeeting(html: string): string | null {
   try {
     const dom = new DOMParser().parseFromString(html, "text/html");
 
     const pick = (texts: string[]) => {
-      // prioriza trechos com "Reunião" + (CAT ou Comitê)
       for (const t of texts) {
         const s = (t || "").replace(/\s+/g, " ").trim();
         if (!s) continue;
         if (/reuni[ãa]o/i.test(s) && /(CAT|Comit[êe])/i.test(s)) return s;
       }
-      // depois, qualquer linha com "Reunião"
       for (const t of texts) {
         const s = (t || "").replace(/\s+/g, " ").trim();
         if (/reuni[ãa]o/i.test(s)) return s;
@@ -112,37 +110,28 @@ function extrairMeeting(html: string): string | null {
       return null;
     };
 
-    // 1) elementos em negrito (strong/b)
     const strongs = Array.from(dom.querySelectorAll("strong,b")).map(
       (el) => el.textContent || ""
     );
     let found = pick(strongs);
     if (found) return found;
 
-    // 2) cabeçalhos
     const headers = Array.from(
       dom.querySelectorAll("h1,h2,h3,h4")
     ).map((el) => el.textContent || "");
     found = pick(headers);
     if (found) return found;
 
-    // 3) primeiras linhas do corpo
     const bodyLines = (dom.body?.innerText || dom.body?.textContent || "")
       .split(/\n+/)
       .slice(0, 60);
     found = pick(bodyLines);
     if (found) return found;
-  } catch {
-    // continua para fallback por regex
-  }
-
-  // Fallbacks por regex (último recurso)
+  } catch {}
   const m1 = html.match(/\b\d{1,3}ª\s*Reuni[aã]o[^\n<]*/i);
   if (m1) return m1[0].replace(/\s+/g, " ").trim();
-
   const m2 = html.match(/(Reuni[aã]o[^\n<]{0,120}(CAT|Comit[êe][^\n<]*))/i);
   if (m2) return m2[1].replace(/\s+/g, " ").trim();
-
   const m3 = html.match(/\b(\d{1,3})ª\b/);
   return m3 ? `${m3[1]}ª` : null;
 }
@@ -278,7 +267,7 @@ const PautaCatPage: React.FC = () => {
   const [historico, setHistorico] = useState<HistoricoItem[]>([]);
   const [currentPautaId, setCurrentPautaId] = useState<string | null>(null);
 
-  // >>> NOVO: DIF entre pautas
+  // >>> DIF entre pautas
   const [pautaBaseId, setPautaBaseId] = useState<string>("");
   const [diffResumo, setDiffResumo] = useState<null | {
     removidos: number;
@@ -288,7 +277,7 @@ const PautaCatPage: React.FC = () => {
   }>(null);
 
   // --- CGIM filter ---
-  const [somenteCgim, setSomenteCgim] = useState<boolean>(true); // <- ATIVO POR PADRÃO
+  const [somenteCgim, setSomenteCgim] = useState<boolean>(true); // ativo por padrão
   const [ncmSet, setNcmSet] = useState<Set<string>>(new Set());
 
   // --- ATRIBUIÇÕES ---
@@ -385,7 +374,7 @@ const PautaCatPage: React.FC = () => {
         ].slice(0, 5)
       );
 
-      // >>> NOVO: aplica diff se houve pauta base informada
+      // aplica diff se houve pauta base informada
       try {
         if (pautaBaseId && pautaBaseId !== pautaId) {
           const resumo = await diffPautas(pautaBaseId, pautaId, { aplicarMarcacoes: true });
@@ -468,7 +457,7 @@ const PautaCatPage: React.FC = () => {
           )
         );
 
-        // >>> NOVO: aplica diff após regravar, se houver pauta base
+        // aplica diff após regravar, se houver pauta base
         try {
           if (pautaBaseId && pautaBaseId !== id) {
             const resumo = await diffPautas(pautaBaseId, id, { aplicarMarcacoes: true });
@@ -568,7 +557,7 @@ const PautaCatPage: React.FC = () => {
     // mesma normalização usada acima
     const rowForKey = {
       NCM: onlyDigits(String(row[ncmHeaderName] || "")),
-      Produto: String(row[produtoHeaderName] || ""),
+      Produto: String(row[produtoHeaderName] || ""), // ✅ sem parêntese extra
       Pleiteante: String(row[pleiteanteHeaderName] || ""),
     } as Record<string, string>;
 
@@ -610,7 +599,8 @@ const PautaCatPage: React.FC = () => {
   })();
 
   return (
-    <div className="p-6">
+    // <<< Evita estourar largura e “apertar” a sidebar
+    <div className="p-6 overflow-x-hidden">
       <h1 className="text-xl font-bold mb-4">Pauta CAT</h1>
 
       {/* Upload */}
@@ -619,7 +609,7 @@ const PautaCatPage: React.FC = () => {
           Importe o arquivo da pauta em <b>.html</b> (exportado do SEI).
         </p>
 
-        {/* >>> NOVO: campo para informar a pauta base (ID) e mostrar o resumo do diff */}
+        {/* Campo para informar a pauta base (ID) e mostrar o resumo do diff */}
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <label className="text-sm text-slate-700">Pauta base (ID):</label>
           <input
@@ -729,8 +719,8 @@ const PautaCatPage: React.FC = () => {
             <div className="flex flex-wrap gap-2">
               {historico.slice(0, 5).map((p) => (
                 <div key={p.id} className="border rounded px-3 py-2 bg-gray-50 min-w-[260px]">
-                  <div className="font-medium">{p.tituloArquivo}</div>
-                  <div className="text-xs text-gray-600 mt-1">
+                  <div className="font-medium break-words">{p.tituloArquivo}</div>
+                  <div className="text-xs text-gray-600 mt-1 break-words">
                     Reunião: <b>{p.meeting ?? "—"}</b>
                   </div>
 
@@ -760,24 +750,40 @@ const PautaCatPage: React.FC = () => {
         )}
       </div>
 
-      {/* Render das seções (com filtro CGIM aplicado) */}
+      {/* Render das seções (SEM scroll horizontal; células quebram linhas) */}
       {secoesFiltradas.map((sec, idxSec) => {
-        const headers = [...sec.headers, "Responsável"];
+        // remove headers vazios/traços para evitar coluna fantasma
+        const baseHeaders = sec.headers.filter((h) => !!norm(h) && norm(h) !== "—");
+        const sanitizedHeaders = dedupeHeaders(baseHeaders);
+        const headers = [...sanitizedHeaders, "Responsável"];
+
         return (
           <div key={`${sec.titulo}-${idxSec}`} className="mb-8 bg-white border rounded">
             <div className="px-4 py-3 border-b font-semibold flex items-center justify-between">
-              <span>{String(sec.titulo)}</span>
+              <span className="break-words">{String(sec.titulo)}</span>
               <span className="text-sm text-gray-500">{Number(sec.qtd) || 0} pleitos</span>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="min-w-full table-fixed">
+            {/* Importante: nada de overflow-x aqui */}
+            <div>
+              <table className="w-full">
+                {/* distribuição aproximada de colunas para estabilidade visual */}
+                <colgroup>
+                  <col style={{ width: "12%" }} />  {/* NCM */}
+                  <col style={{ width: "28%" }} />  {/* Produto */}
+                  <col style={{ width: "18%" }} />  {/* Pleiteante */}
+                  <col style={{ width: "14%" }} />  {/* Redução */}
+                  <col style={{ width: "14%" }} />  {/* Quota */}
+                  <col style={{ width: "20%" }} />  {/* País/Prazo/Situação */}
+                  <col />                           {/* Responsável */}
+                </colgroup>
+
                 <thead>
                   <tr className="bg-gray-100">
                     {headers.map((h) => (
                       <th
                         key={h}
-                        className="px-4 py-2 text-left align-top text-sm md:text-base break-words"
+                        className="px-4 py-2 text-left align-top text-sm md:text-base whitespace-pre-wrap break-words"
                       >
                         {String(h)}
                       </th>
@@ -786,10 +792,10 @@ const PautaCatPage: React.FC = () => {
                 </thead>
                 <tbody>
                   {sec.rows.map((row, rIdx) => {
-                    // valor atual
+                    // valor atual p/ atribuição
                     const rowForKey = {
                       NCM: onlyDigits(String(row[ncmHeaderName] || "")),
-                      Produto: String(row[produtoHeaderName] || ""),
+                      Produto: String(row[produtoHeaderName] || ""), // ✅ sem parêntese extra
                       Pleiteante: String(row[pleiteanteHeaderName] || ""),
                     } as Record<string, string>;
                     const key = gerarPleitoKey(rowForKey);
@@ -797,13 +803,17 @@ const PautaCatPage: React.FC = () => {
 
                     return (
                       <tr key={`${sec.titulo}-${rIdx}`} className="border-t">
-                        {sec.headers.map((h) => {
+                        {sanitizedHeaders.map((h) => {
                           const cell = String(row[h] ?? "");
                           const isNcm = normKey(h).startsWith("ncm");
+                          const isProd = normKey(h).includes("produto");
+                          const isPlei = normKey(h).includes("pleiteante");
                           return (
                             <td
                               key={`${h}-${rIdx}`}
-                              className="px-4 py-3 align-top whitespace-pre-wrap break-words text-sm md:text-base"
+                              className={`px-4 py-3 align-top text-sm md:text-base whitespace-pre-wrap ${
+                                isNcm ? "break-all" : "break-words"
+                              } ${isProd || isPlei ? "whitespace-pre-wrap" : ""}`}
                             >
                               {isNcm ? <b>{cell}</b> : cell}
                             </td>
@@ -813,7 +823,7 @@ const PautaCatPage: React.FC = () => {
                         <td className="px-4 py-3 align-top">
                           <div className="flex items-center gap-2">
                             <select
-                              className="border rounded px-2 py-1 text-sm"
+                              className="border rounded px-2 py-1 text-sm max-w-[220px]"
                               value={atual || "—"}
                               onChange={(e) => onAtribuir(row, sec.titulo, e.target.value)}
                             >

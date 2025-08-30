@@ -4,6 +4,8 @@ import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { doc, getDoc, getFirestore, updateDoc, serverTimestamp } from "firebase/firestore";
 import toast from "react-hot-toast";
 import { FileText } from "lucide-react";
+// histórico
+import { getHistoricoByPleitoKey, upsertHistoricoFromAtribuicao } from "../services/historicoAnalisesService";
 
 /* ----------------------------- Tipos ----------------------------- */
 type Analise = {
@@ -11,6 +13,13 @@ type Analise = {
   comercio?: string;
   tecnica?: string;
   sugestao?: string;
+};
+
+type PosDeliberacao = {
+  data?: string;               // ISO yyyy-mm-dd
+  resultado?: "aprovado" | "aprovado_com_ajustes" | "indeferido" | "retirado" | "outro";
+  encaminhamento?: string;     // texto livre (encaminhamento/observações)
+  numeroAta?: string;          // n° ATA/SEI/registro
 };
 
 type Atrib = {
@@ -23,6 +32,7 @@ type Atrib = {
   status?: string;
   analise?: Analise | null;
   pleitoKey?: string;
+  posDeliberacao?: PosDeliberacao | null; // << NOVO
 };
 
 /* ---------------------------- Helpers ---------------------------- */
@@ -178,6 +188,7 @@ const AnalisePleitoPage: React.FC = () => {
   const [ficha, setFicha] = useState<Record<string, string>>({});
   const [pedido, setPedido] = useState<PedidoInfo>({ _matchedKeys: [] });
   const [form, setForm] = useState<Analise>({});
+  const [pos, setPos] = useState<PosDeliberacao>({}); // << NOVO
   const [salvando, setSalvando] = useState(false);
   const [carregando, setCarregando] = useState(true);
 
@@ -208,9 +219,11 @@ const AnalisePleitoPage: React.FC = () => {
           status: v?.status || "novo",
           analise: v?.analise || null,
           pleitoKey: v?.pleitoKey || "",
+          posDeliberacao: v?.posDeliberacao || null, // << ler se existir
         };
         setAtr(atrib);
         setForm(atrib.analise || {});
+        setPos(atrib.posDeliberacao || {});
 
         // carrega rascunho se copyFrom veio
         if (copyFrom) {
@@ -228,6 +241,27 @@ const AnalisePleitoPage: React.FC = () => {
             /* silencioso */
           }
         }
+
+        // fallback do HISTÓRICO se não veio copyFrom e a análise atual está vazia
+        try {
+          const temAtual =
+            !!((atrib?.analise?.resumo && atrib.analise.resumo.trim()) ||
+               (atrib?.analise?.comercio && atrib.analise.comercio.trim()) ||
+               (atrib?.analise?.tecnica && atrib.analise.tecnica.trim()) ||
+               (atrib?.analise?.sugestao && atrib.analise.sugestao.trim()));
+          if (!copyFrom && !temAtual && (atrib?.pleitoKey || v?.pleitoKey)) {
+            const hist = await getHistoricoByPleitoKey(getFirestore(), (atrib?.pleitoKey || v?.pleitoKey)!);
+            if (hist && (hist.ultimoResumo || hist.ultimoComercio || hist.ultimaTecnica || hist.ultimaSugestao)) {
+              setDraft({
+                resumo: hist.ultimoResumo || "",
+                comercio: hist.ultimoComercio || "",
+                tecnica: hist.ultimaTecnica || "",
+                sugestao: hist.ultimaSugestao || "",
+              });
+              setDraftLoadedFrom("histórico");
+            }
+          }
+        } catch { /* não bloqueia a página */ }
 
         // Matching de linha da pauta
         let line: any = v?.linhaPauta || null;
@@ -308,12 +342,41 @@ const AnalisePleitoPage: React.FC = () => {
           tecnica: form.tecnica || "",
           sugestao: form.sugestao || "",
         },
+        // inclui posDeliberacao no mesmo update (idempotente)
+        posDeliberacao: {
+          data: pos.data || "",
+          resultado: pos.resultado || "",
+          encaminhamento: pos.encaminhamento || "",
+          numeroAta: pos.numeroAta || "",
+        },
         updatedAt: serverTimestamp(),
       };
       if (statusForcado) payload.status = statusForcado;
       else if (!atr.status || atr.status === "novo") payload.status = "em_analise";
 
       await updateDoc(doc(db, "atribuicoes", atr.id), payload);
+
+      // upsert no histórico canônico por pleitoKey
+      try {
+        await upsertHistoricoFromAtribuicao(db, {
+          id: atr.id,
+          pautaId: atr.pautaId,
+          pleitoKey: atr.pleitoKey,
+          ncm: atr.ncm,
+          produto: atr.produto,
+          pleiteante: atr.pleiteante,
+          analise: {
+            resumo: payload.analise?.resumo || "",
+            comercio: payload.analise?.comercio || "",
+            tecnica: payload.analise?.tecnica || "",
+            sugestao: payload.analise?.sugestao || "",
+          },
+          updatedAt: new Date(),
+        } as any);
+      } catch {
+        /* não interrompe o fluxo do usuário */
+      }
+
       toast.success(statusForcado === "concluido" ? "Análise concluída." : "Análise salva.");
       if (statusForcado === "concluido") navigate("/");
     } catch (e) {
@@ -587,6 +650,74 @@ const AnalisePleitoPage: React.FC = () => {
               onClick={() => salvar("concluido")}
             >
               Concluir análise
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {/* NOVO: Encaminhamento ao GECEX */}
+      <section className="rounded-2xl border bg-white shadow-sm">
+        <header className="p-4 sm:p-5 border-b">
+          <h2 className="text-base sm:text-lg font-semibold">Encaminhamento ao GECEX</h2>
+        </header>
+        <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm text-slate-600 mb-1">Data da deliberação</label>
+            <input
+              type="date"
+              className="w-full border rounded-lg p-2"
+              value={pos.data || ""}
+              onChange={(e) => setPos((p) => ({ ...p, data: e.target.value }))}
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-slate-600 mb-1">Resultado</label>
+            <select
+              className="w-full border rounded-lg p-2"
+              value={pos.resultado || ""}
+              onChange={(e) =>
+                setPos((p) => ({
+                  ...p,
+                  resultado: (e.target.value || "") as PosDeliberacao["resultado"],
+                }))
+              }
+            >
+              <option value="">—</option>
+              <option value="aprovado">Aprovado</option>
+              <option value="aprovado_com_ajustes">Aprovado com ajustes</option>
+              <option value="indeferido">Indeferido</option>
+              <option value="retirado">Retirado</option>
+              <option value="outro">Outro</option>
+            </select>
+          </div>
+
+          <div className="md:col-span-2">
+            <label className="block text-sm text-slate-600 mb-1">Encaminhamento / observações</label>
+            <textarea
+              className="w-full border rounded-lg p-2 min-h-[120px] resize-y"
+              value={pos.encaminhamento || ""}
+              onChange={(e) => setPos((p) => ({ ...p, encaminhamento: e.target.value }))}
+              placeholder="Ex.: Encaminhar à GECEX com recomendação XYZ…"
+            />
+          </div>
+
+          <div className="md:col-span-2">
+            <label className="block text-sm text-slate-600 mb-1">Nº da ata / processo SEI (opcional)</label>
+            <input
+              className="w-full border rounded-lg p-2"
+              value={pos.numeroAta || ""}
+              onChange={(e) => setPos((p) => ({ ...p, numeroAta: e.target.value }))}
+              placeholder="Ex.: ATA 123/2025 — SEI 1234567"
+            />
+          </div>
+
+          <div className="md:col-span-2 flex items-center gap-2">
+            <button
+              className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
+              disabled={salvando}
+              onClick={() => salvar()}
+            >
+              Salvar encaminhamento
             </button>
           </div>
         </div>

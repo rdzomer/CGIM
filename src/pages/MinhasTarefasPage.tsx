@@ -53,17 +53,14 @@ type Atribuicao = {
   assigneeKeys?: string[];
 
   status?: string;
-  updatedAt?: any;
-  createdAt?: any;
-
   analise?: {
     resumo?: string;
     comercio?: string;
     tecnica?: string;
     sugestao?: string;
-  };
+  } | null;
 
-  [k: string]: any;
+  updatedAt?: any;
 };
 
 type AnyRow = Record<string, any>;
@@ -85,7 +82,6 @@ const toMillis = (t: any): number => {
   if (!t) return 0;
   if (typeof t === "number") return t;
   if (t instanceof Date) return t.getTime();
-  if (typeof t?.toMillis === "function") return t.toMillis();
   if (t?.toDate) return t.toDate().getTime?.() || 0;
   if (t?.seconds) return t.seconds * 1000 + (t.nanoseconds || 0) / 1e6;
   return 0;
@@ -110,26 +106,16 @@ function emailToLikelyNames(email?: string): string[] {
   const parts = local.split(/[.\-_]/).filter(Boolean);
   const cap = (w: string) => (w ? w.charAt(0).toUpperCase() + w.slice(1) : "");
   const title = parts.map(cap).join(" ").trim();
-  const set = new Set<string>([title].filter(Boolean) as string[]);
-  if (/zomer/i.test(local)) set.add("Ricardo Zomer");
-  if (/reck/i.test(local) || /pedro/i.test(local)) set.add("Pedro Reckziegel");
-  if (/azambuja|antonio|ant[ôo]nio/i.test(local)) set.add("Antonio Azambuja");
-  return Array.from(set);
+  return [title].filter(Boolean);
 }
 
-/* ====== util para varrer headers flexíveis ====== */
-function pickKey(row: AnyRow, candidates: string[]): string | undefined {
+function pickKey(row: AnyRow, labels: string[]) {
   const keys = Object.keys(row || {});
-  for (const cand of candidates) {
-    const target = normKey(cand);
-    const k = keys.find((kk) => normKey(kk) === target);
-    if (k) return k;
-  }
-  for (const kk of keys) {
-    const nk = normKey(kk);
-    if (candidates.some((c) => nk.includes(normKey(c)))) return kk;
-  }
-  return undefined;
+  const nk = (x: string) => x.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const hit =
+    keys.find((k) => labels.some((l) => nk(k) === nk(l))) ??
+    keys.find((k) => labels.some((l) => nk(k).includes(nk(l))));
+  return hit || "";
 }
 
 function projectLinha(row: AnyRow) {
@@ -172,53 +158,19 @@ function flattenPleitosFromPauta(pauta: PautaDoc) {
     : Array.isArray(pauta?.sections)
     ? pauta.sections
     : [];
-
   for (const sec of secoes) {
     const secTitle = renderStr(sec?.title ?? sec?.titulo ?? "", "");
-
-    // rows
-    if (Array.isArray(sec?.rows)) {
-      for (const r of sec.rows) out.push({ ...r, __sec: secTitle });
-    }
-
-    // tabelas
-    if (Array.isArray((sec as any)?.tabelas)) {
-      for (const tb of (sec as any).tabelas) {
-        if (Array.isArray(tb?.rows)) {
-          for (const r of tb.rows) out.push({ ...r, __sec: secTitle });
-        }
-      }
-    }
-
-    // tables
-    if (Array.isArray((sec as any)?.tables)) {
-      for (const tb of (sec as any).tables) {
-        if (Array.isArray(tb?.rows)) {
-          for (const r of tb.rows) out.push({ ...r, __sec: secTitle });
-        }
-      }
-    }
-
-    // pleitos
-    if (Array.isArray((sec as any)?.pleitos)) {
-      for (const r of (sec as any).pleitos) out.push({ ...r, __sec: secTitle });
-    }
+    if (Array.isArray(sec?.rows)) sec.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+    if (Array.isArray(sec?.tabelas))
+      sec.tabelas.forEach((tb: any) => Array.isArray(tb?.rows) && tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle })));
+    if (Array.isArray(sec?.tables))
+      sec.tables.forEach((tb: any) => Array.isArray(tb?.rows) && tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle })));
+    if (Array.isArray(sec?.pleitos)) sec.pleitos.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
   }
-
-  // pauta.tabelas
-  if (Array.isArray((pauta as any)?.tabelas)) {
-    for (const tb of (pauta as any).tabelas) {
-      if (Array.isArray(tb?.rows)) {
-        for (const r of tb.rows) out.push({ ...r, __sec: "" });
-      }
-    }
-  }
-
-  // pauta.pleitos
-  if (Array.isArray((pauta as any)?.pleitos)) {
-    for (const r of (pauta as any).pleitos) out.push({ ...r, __sec: "" });
-  }
-
+  if (Array.isArray((pauta as any)?.tabelas))
+    (pauta as any).tabelas.forEach((tb: any) => Array.isArray(tb?.rows) && tb.rows.forEach((r: any) => out.push({ ...r, __sec: "" })));
+  if (Array.isArray((pauta as any)?.pleitos))
+    (pauta as any).pleitos.forEach((r: any) => out.push({ ...r, __sec: "" }));
   return out;
 }
 
@@ -362,6 +314,11 @@ async function findBestPriorAnalysisId(
     cand.push(a);
   });
 
+  if (!cand.length) {
+    reaproveitoCache.set(k, null);
+    return null;
+  }
+
   cand.sort((a, b) => {
     const rank = (x: Atribuicao) => {
       const st = normalizeStatus(x.status);
@@ -375,13 +332,14 @@ async function findBestPriorAnalysisId(
     return toMillis(b.updatedAt) - toMillis(a.updatedAt);
   });
 
-  const best = cand[0];
-  const bestId = best ? best.id : null;
-  reaproveitoCache.set(k, bestId);
-  return bestId;
+  const best = cand[0]?.id || null;
+  reaproveitoCache.set(k, best);
+  return best;
 }
 
-/* ==================== Página ==================== */
+/* ==================== Componente ==================== */
+const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"]; // Novo, Em análise, Concluído
+
 const MinhasTarefasPage: React.FC = () => {
   const db = getFirestore();
   const nav = useNavigate();
@@ -453,17 +411,27 @@ const MinhasTarefasPage: React.FC = () => {
             if (!found && t.pleitoKey) {
               found = rows.find((r) => {
                 const k = tryMakeKeyFromRow(r);
-                return k && normKey(k) === normKey(t.pleitoKey);
+                return k && normKey(k) === normKey(t.pleitoKey!);
+              });
+            }
+
+            // fallback por NCM+Produto
+            if (!found) {
+              const n8 = onlyDigits(t.ncm).slice(0, 8);
+              const prodNk = normKey(t.produto || "");
+              found = rows.find((r) => {
+                const pr = projectLinha(r);
+                return onlyDigits(pr.ncm).slice(0, 8) === n8 && normKey(pr.produto) === prodNk;
               });
             }
 
             if (found) {
-              const proj = projectLinha(found);
-              t.ncm = t.ncm || proj.ncm;
-              t.produto = t.produto || proj.produto;
-              t.pleiteante = t.pleiteante || proj.pleiteante;
-              t.tipoPleito = t.tipoPleito || proj.tipoPleito;
-              t.tituloSecao = t.tituloSecao || renderStr((found as any).__sec, "");
+              const pr = projectLinha(found);
+              t.ncm = t.ncm || pr.ncm;
+              t.produto = t.produto || pr.produto;
+              t.pleiteante = t.pleiteante || pr.pleiteante;
+              t.tipoPleito = t.tipoPleito || pr.tipoPleito;
+              t.tituloSecao = t.tituloSecao || String((found as any)?.__sec || "");
             }
           }
         }
@@ -490,7 +458,7 @@ const MinhasTarefasPage: React.FC = () => {
           }
         } catch {}
 
-        // 4) ordenação
+        // 4) ordenar: em_analise > nao_iniciado > concluido; depois por atualização
         merged.sort((a, b) => {
           const rank = (s?: string) => {
             const n = normalizeStatus(s);
@@ -523,23 +491,21 @@ const MinhasTarefasPage: React.FC = () => {
 
   // ====== gráfico de status ======
   const resumo = useMemo(() => {
-    const acc = { nao_iniciado: 0, em_analise: 0, concluido: 0 };
-    for (const t of tarefas) acc[normalizeStatus(t.status) as keyof typeof acc] += 1;
-    return acc;
+    const c = { em_analise: 0, nao_iniciado: 0, concluido: 0 };
+    for (const t of tarefas) c[normalizeStatus(t.status) as keyof typeof c]++;
+    return c;
   }, [tarefas]);
 
   const pieData = useMemo(
     () => [
       { name: "Novo", value: resumo.nao_iniciado },
-      { name: "Em Análise", value: resumo.em_analise },
+      { name: "Em análise", value: resumo.em_analise },
       { name: "Concluído", value: resumo.concluido },
     ],
     [resumo]
   );
-  const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"];
 
-  // ====== ações ======
-  function openAnalyse(t: Atribuicao) {
+  const openAnalyse = (t: Atribuicao) => {
     const atrId = t.id || makeAtribuicaoId(t.pleitoKey || "");
     const url = `/analise/${encodeURIComponent(atrId)}`;
     const el = document.activeElement as HTMLElement | null;
@@ -557,17 +523,16 @@ const MinhasTarefasPage: React.FC = () => {
     nav(url);
   }
 
-  // ====== UI helpers ======
   const statusBadge = (s?: string) => {
     const n = normalizeStatus(s);
     const map: Record<string, string> = {
-      nao_iniciado: "bg-gray-100 text-gray-700 border border-gray-200",
-      em_analise: "bg-blue-100 text-blue-700 border border-blue-200",
-      concluido: "bg-green-100 text-green-700 border border-green-200",
+      em_analise: "bg-amber-50 border border-amber-200 text-amber-800",
+      nao_iniciado: "bg-slate-50 border border-slate-200 text-slate-700",
+      concluido: "bg-emerald-50 border border-emerald-200 text-emerald-800",
     };
     const label: Record<string, string> = {
+      em_analise: "Em análise",
       nao_iniciado: "Novo",
-      em_analise: "Em Análise",
       concluido: "Concluído",
     };
     return (
@@ -587,12 +552,9 @@ const MinhasTarefasPage: React.FC = () => {
         <div className="h-4 w-full bg-gray-200 rounded" />
         <div className="h-4 w-full bg-gray-200 rounded" />
         <div className="h-4 w-full bg-gray-200 rounded" />
-        <div className="h-4 w-full bg-gray-200 rounded" />
+        <div className="h-4 w-1/2 bg-gray-200 rounded" />
       </div>
-      <div className="mt-4 flex gap-2">
-        <div className="h-8 w-20 bg-gray-200 rounded" />
-        <div className="h-8 w-32 bg-gray-200 rounded" />
-      </div>
+      <div className="mt-4 h-9 w-28 bg-gray-200 rounded" />
     </div>
   );
 
@@ -638,8 +600,9 @@ const MinhasTarefasPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Cards */}
+      {/* ====== Cards (visual “antigo” em cards) ====== */}
       <div className="w-full">
+        {/* carregando */}
         {loading && (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -648,85 +611,88 @@ const MinhasTarefasPage: React.FC = () => {
           </div>
         )}
 
-        {!loading && tarefas.length === 0 && (
-          <div className="rounded-xl border bg-white/70 p-6 text-gray-600">
-            Nenhuma tarefa atribuída a você.
-          </div>
-        )}
+        {/* lista */}
+        {!loading && (
+          <>
+            {tarefas.length === 0 ? (
+              <div className="rounded-xl border bg-white/70 p-8 text-center text-slate-600">
+                Nenhuma tarefa atribuída a você.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {tarefas.map((t) => {
+                  const canReuse = !!(t.pleitoKey && priorMap[t.id]);
+                  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openAnalyse(t);
+                    }
+                  };
 
-        {!loading && tarefas.length > 0 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
-            {tarefas.map((t) => {
-              const canReuse = !!(t.pleitoKey && priorMap[t.id]);
-              const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  openAnalyse(t);
-                }
-              };
-              return (
-                <div
-                  key={t.id}
-                  className="rounded-xl border bg-white/70 p-4 hover:shadow-md transition cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => openAnalyse(t)}
-                  onKeyDown={handleKeyDown}
-                >
-                  {/* Cabeçalho */}
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-xs text-gray-500">{renderStr(t.tituloSecao)}</div>
-                      <div className="mt-0.5 font-semibold truncate">{renderStr(t.produto)}</div>
-                    </div>
-                    {statusBadge(t.status)}
-                    {(t as any).__retirado ? (
-                      <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-800 border border-rose-200">
-                        Retirado (retificação)
-                      </span>
-                    ) : null}
-                  </div>
-
-                  {/* Infos principais */}
-                  <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-                    <div className="space-y-1">
-                      <div className="text-xs text-gray-500">NCM</div>
-                      <div className="font-medium">{fmtNCM(t.ncm)}</div>
-                    </div>
-                    <div className="space-y-1">
-                      <div className="text-xs text-gray-500">Tipo de Pleito</div>
-                      <div className="font-medium">{renderStr(t.tipoPleito)}</div>
-                    </div>
-                    <div className="space-y-1 col-span-2">
-                      <div className="text-xs text-gray-500">Pleiteante</div>
-                      <div className="font-medium truncate">{renderStr(t.pleiteante)}</div>
-                    </div>
-                  </div>
-
-                  {/* Ações */}
-                  <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100"
+                  return (
+                    <div
+                      key={t.id}
+                      className="rounded-xl border bg-white/70 p-4 hover:shadow-sm transition cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      role="button"
+                      tabIndex={0}
                       onClick={() => openAnalyse(t)}
-                      aria-label="Abrir análise"
+                      onKeyDown={handleKeyDown}
                     >
-                      Abrir
-                    </button>
-                    {canReuse && (
-                      <button
-                        className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100"
-                        onClick={() => onReaproveitar(t)}
-                        aria-label="Reaproveitar análise anterior"
-                        title="Reaproveitar análise anterior"
-                      >
-                        Reaproveitar análise
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                      {/* Cabeçalho */}
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-xs text-gray-500">{renderStr(t.tituloSecao)}</div>
+                          <div className="mt-0.5 font-semibold truncate">{renderStr(t.produto)}</div>
+                        </div>
+                        {statusBadge(t.status)}
+                        {(t as any).__retirado ? (
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-800 border border-rose-200">
+                            Retirado (retificação)
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {/* Infos principais */}
+                      <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+                        <div className="space-y-1">
+                          <div className="text-xs text-gray-500">NCM</div>
+                          <div className="font-medium">{fmtNCM(t.ncm)}</div>
+                        </div>
+                        <div className="space-y-1">
+                          <div className="text-xs text-gray-500">Tipo de Pleito</div>
+                          <div className="font-medium">{renderStr(t.tipoPleito)}</div>
+                        </div>
+                        <div className="space-y-1 col-span-2">
+                          <div className="text-xs text-gray-500">Pleiteante</div>
+                          <div className="font-medium truncate">{renderStr(t.pleiteante)}</div>
+                        </div>
+                      </div>
+
+                      {/* Ações */}
+                      <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100"
+                          onClick={() => openAnalyse(t)}
+                          aria-label="Abrir análise"
+                        >
+                          Abrir
+                        </button>
+                        {canReuse && (
+                          <button
+                            className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100"
+                            onClick={() => onReaproveitar(t)}
+                            disabled={!!copyLoading[t.id]}
+                          >
+                            {copyLoading[t.id] ? "Abrindo…" : "Reaproveitar análise anterior"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

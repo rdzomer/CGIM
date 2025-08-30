@@ -1,22 +1,30 @@
-/* src/components/layout/AppShell.tsx */
 import React from "react";
 import Sidebar from "./Sidebar";
-import Header from "./Header";
+import { useAuth } from "../../contexts/AuthContext";
+import LogoutButton from "../../LogoutButton";
 
+/**
+ * Shell de layout: Sidebar fixo + topo simples e o conteúdo das páginas.
+ * Não limita largura do conteúdo (w-full), para o Relatório ocupar a página toda.
+ */
 const AppShell: React.FC<React.PropsWithChildren> = ({ children }) => {
+  const { user } = useAuth();
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 text-slate-900">
-      <div className="flex">
-        {/* Sidebar fixa à esquerda */}
-        <Sidebar />
-        {/* Área principal ocupa todo o restante, sem largura máxima */}
-        <div className="flex-1 min-w-0">
-          <Header />
-          <main className="px-6 py-6">
-            {/* Removido max-w; o conteúdo agora usa 100% da largura disponível */}
-            <div className="w-full">{children}</div>
-          </main>
-        </div>
+    <div className="min-h-screen flex bg-slate-50">
+      {/* Lateral */}
+      <Sidebar />
+
+      {/* Conteúdo */}
+      <div className="flex-1 flex flex-col">
+        {/* Topbar enxuta */}
+        <header className="flex items-center justify-end gap-3 h-14 px-4 border-b bg-white/70 backdrop-blur">
+          <span className="text-sm text-slate-600">{user?.email ?? ""}</span>
+          <LogoutButton />
+        </header>
+
+        {/* Área principal — sem max-w, ocupa largura total */}
+        <main className="flex-1 p-4 md:p-6 w-full">{children}</main>
       </div>
     </div>
   );

@@ -1,4 +1,3 @@
-// src/pages/RelatorioConsolidadoPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
@@ -56,10 +55,12 @@ const escapeHtml = (t: string) =>
 type PautaDoc = {
   id: string;
   meeting?: string;
-  titulo?: string;
+  tituloArquivo?: string;
   createdAt?: any;
   sections?: any[];
   secoes?: any[]; // legado
+  diffResumo?: { baseId?: string } | null;
+  isRetificadora?: boolean;
 };
 
 type AnaliseBloco = {
@@ -100,9 +101,24 @@ type ItemRelatorio = {
   atribId?: string;
 };
 
-type PautaOption = { id: string; meeting: string; titulo: string };
+type PautaOption = {
+  id: string;
+  meeting: string;
+  titulo: string;
+  // extras p/ rotular retificações
+  isRet: boolean;
+  baseKey: string;
+  createdAtMs: number;
+  versaoRet?: number; // 1,2,3...
+};
 
 /** ===================== Helpers de pauta ===================== */
+function retBaseKey(meeting?: string) {
+  const s = norm(meeting);
+  // remove “(RETIFICADA)” e variantes
+  return s.replace(/\(retificad[ao](?:[^)]*)?\)/gi, "").replace(/\s+/g, " ").trim();
+}
+
 function flattenPauta(p: PautaDoc): Array<{ secao: string; row: any }> {
   const out: Array<{ secao: string; row: any }> = [];
   const list =
@@ -148,8 +164,8 @@ function projectLinha(row: Record<string, any>) {
     "Descrição",
     "Descricao",
   ]);
-  const pleiteante = by(["Pleiteante", "Requerente", "Solicitante"]);
-  const tipoPleito = by(["Tipo de Pleito", "Tipo do Pleito", "Tipo", "tipo"]);
+  const pleiteante = by(["Pleiteante", "Requerente", "Solicitante", "Empresa"]);
+  const tipoPleito = by(["Tipo de Pleito", "Tipo do Pleito", "Tipo", "Pleito", "Pedido"]);
 
   return { ncm, produto, pleiteante, tipoPleito };
 }
@@ -194,24 +210,77 @@ const RelatorioConsolidadoPage: React.FC = () => {
   const [atribuicoes, setAtribuicoes] = useState<Atribuicao[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Carrega opções de pautas (dropdown)
+  // Carrega opções de pautas (dropdown) — com numeração de retificações
   useEffect(() => {
     (async () => {
       const snap = await getDocs(collection(db, "pautas"));
-      const opts: PautaOption[] = [];
+      const temp: Omit<PautaOption, "versaoRet">[] = [];
       snap.forEach((d) => {
         const v = d.data() as any;
         const meetingRaw = String(v?.meeting || v?.titulo || d.id || "");
         const fileTitle = String(v?.tituloArquivo || v?.fileName || "");
-        const isRet = !!(v?.diffResumo?.baseId || v?.isRetificadora) || /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
+        const isRet =
+          !!(v?.diffResumo?.baseId || v?.isRetificadora) ||
+          /retificad/i.test(meetingRaw) ||
+          /retificad/i.test(fileTitle);
         const meeting = `${meetingRaw}${isRet ? " (RETIFICADA)" : ""}`;
-        opts.push({
+        const baseKey = String(
+          v?.diffResumo?.baseId ||
+            retBaseKey(meetingRaw) ||
+            retBaseKey(fileTitle) ||
+            retBaseKey(d.id)
+        );
+        const createdAtMs =
+          typeof v?.createdAt?.toMillis === "function"
+            ? v.createdAt.toMillis()
+            : v?.createdAt instanceof Date
+            ? v.createdAt.getTime()
+            : 0;
+        temp.push({
           id: d.id,
           meeting,
           titulo: String(v?.titulo || v?.meeting || ""),
+          isRet,
+          baseKey,
+          createdAtMs,
         });
       });
-      opts.sort((a, b) => b.meeting.localeCompare(a.meeting));
+
+      // numera retificações por baseKey
+      const byBase = new Map<string, PautaOption[]>();
+      for (const p of temp) {
+        const arr = byBase.get(p.baseKey) || [];
+        arr.push({ ...p, versaoRet: undefined });
+        byBase.set(p.baseKey, arr);
+      }
+      const out: PautaOption[] = [];
+      byBase.forEach((arr) => {
+        const sorted = arr.sort((a, b) => a.createdAtMs - b.createdAtMs);
+        let v = 0;
+        for (const it of sorted) {
+          if (it.isRet) {
+            v += 1;
+            out.push({ ...it, versaoRet: v });
+          } else {
+            out.push({ ...it, versaoRet: undefined });
+          }
+        }
+      });
+
+      // label final com vN
+      const opts = out
+        .map((o) => {
+          const hasV = o.isRet && o.versaoRet && o.versaoRet > 0;
+          const meetingLabel = hasV
+            ? String(o.meeting || "").replace(
+                /\(RETIFICADA\)/i,
+                `(RETIFICADA v${o.versaoRet})`
+              )
+            : o.meeting;
+          return { ...o, meeting: meetingLabel || o.meeting };
+        })
+        .sort((a, b) => b.createdAtMs - a.createdAtMs);
+
       setPautas(opts);
 
       const urlPid = sp.get("pautaId") || sp.get("pauta") || "";
@@ -342,9 +411,12 @@ const RelatorioConsolidadoPage: React.FC = () => {
             "pleiteante",
             "requerente",
             "solicitante",
+            "empresa",
             "tipo de pleito",
             "tipo do pleito",
             "tipo",
+            "pleito",
+            "pedido",
           ].includes(nk)
         )
           return;
@@ -394,8 +466,11 @@ const RelatorioConsolidadoPage: React.FC = () => {
     const sel = pautas.find((p) => p.id === pautaSel);
     const meetingRaw = String(sel?.meeting || pautaDoc?.meeting || "");
     const fileTitle = String((pautaDoc as any)?.tituloArquivo || "");
-    const isRet = !!((pautaDoc as any)?.diffResumo?.baseId || (pautaDoc as any)?.isRetificadora) || /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
-    const meetingLabel = `${meetingRaw}${isRet ? " (RETIFICADA)" : ""}`;
+    const isRet =
+      !!((pautaDoc as any)?.diffResumo?.baseId || (pautaDoc as any)?.isRetificadora) ||
+      /retificad/i.test(meetingRaw) ||
+      /retificad/i.test(fileTitle);
+    const meetingLabel = `${meetingRaw}${isRet && !/\(RETIFICADA/.test(meetingRaw) ? " (RETIFICADA)" : ""}`;
     const linhaTopo = "Ministério do Desenvolvimento, Indústria, Comércio e Serviços";
     const blocoCompleto = `Relatório de Análises – CGIM – Pauta ${meetingLabel}`;
     const notas = 'Seções: "Análise Técnica" e "Sugestão CGIM"';
@@ -406,12 +481,14 @@ const RelatorioConsolidadoPage: React.FC = () => {
     await exportRelatorioDocx({
       cabecalho,
       itens: itensTS,
-      nomeArquivo: (() => { 
-        const meetingRaw = String(pautaDoc?.meeting || pautaSel || "");
-        const fileTitle = String((pautaDoc as any)?.tituloArquivo || "");
-        const isRet = !!((pautaDoc as any)?.diffResumo?.baseId || (pautaDoc as any)?.isRetificadora) || /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
-        const meetingLabel = `${meetingRaw}${isRet ? " (RETIFICADA)" : ""}`;
-        return `Relatorio_CGIM_${meetingLabel}.docx`;
+      nomeArquivo: (() => {
+        const sel = pautas.find((p) => p.id === pautaSel);
+        return (
+          `Relatorio_CGIM_${String(sel?.meeting || pautaDoc?.meeting || pautaSel)}`.replace(
+            /[^\w\s().-]+/g,
+            "_"
+          ) + ".docx"
+        );
       })(),
     });
   };
@@ -424,11 +501,8 @@ const RelatorioConsolidadoPage: React.FC = () => {
     if (!itensBase.length) return;
 
     const title = (() => {
-      const meetingRaw = String(pautaDoc?.meeting || pautaSel || "");
-      const fileTitle = String((pautaDoc as any)?.tituloArquivo || "");
-      const isRet = !!((pautaDoc as any)?.diffResumo?.baseId || (pautaDoc as any)?.isRetificadora) || /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
-      const meetingLabel = `${meetingRaw}${isRet ? " (RETIFICADA)" : ""}`;
-      return `Relatório Completo – ${meetingLabel}`;
+      const sel = pautas.find((p) => p.id === pautaSel);
+      return `Relatório Completo – ${String(sel?.meeting || pautaDoc?.meeting || pautaSel)}`;
     })();
     const css = `
       * { box-sizing: border-box; }
@@ -455,7 +529,10 @@ const RelatorioConsolidadoPage: React.FC = () => {
     const bodyCards = itensBase
       .map((it) => {
         const info = Object.entries(it.infoDaPauta)
-          .map(([k, v]) => `<div><b>${escapeHtml(k)}:</b></div><div>${escapeHtml(String(v))}</div>`)
+          .map(
+            ([k, v]) =>
+              `<div><b>${escapeHtml(k)}:</b></div><div>${escapeHtml(String(v))}</div>`
+          )
           .join("");
         const infoGrid = info ? `<div class="grid">${info}</div>` : "";
 
@@ -463,17 +540,43 @@ const RelatorioConsolidadoPage: React.FC = () => {
           <div class="card">
             <div class="head">
               <div class="title">${it.indice}. NCM ${escapeHtml(it.ncm)}</div>
-              <div class="meta">${escapeHtml(it.secaoTitulo)}${it.tipoPleito ? " • " + escapeHtml(it.tipoPleito) : ""}</div>
+              <div class="meta">${escapeHtml(it.secaoTitulo)}${
+          it.tipoPleito ? " • " + escapeHtml(it.tipoPleito) : ""
+        }</div>
             </div>
             <div class="grid">
               <div><b>Pleiteante:</b></div><div>${escapeHtml(it.pleiteante || "—")}</div>
               <div><b>Produto:</b></div><div>${escapeHtml(it.produto || "—")}</div>
             </div>
             ${infoGrid}
-            ${it.analise.resumo ? `<div class="sec resumo"><b>Resumo:</b> ${escapeHtml(it.analise.resumo)}</div>` : ""}
-            ${it.analise.comercio ? `<div class="sec comercio"><b>Comércio:</b> ${escapeHtml(it.analise.comercio)}</div>` : ""}
-            ${it.analise.tecnica ? `<div class="sec tecnica"><b>Análise Técnica:</b> ${escapeHtml(it.analise.tecnica)}</div>` : ""}
-            ${it.analise.sugestao ? `<div class="sec sugestao"><b>Sugestão CGIM:</b> ${escapeHtml(it.analise.sugestao)}</div>` : ""}
+            ${
+              it.analise.resumo
+                ? `<div class="sec resumo"><b>Resumo:</b> ${escapeHtml(
+                    it.analise.resumo
+                  )}</div>`
+                : ""
+            }
+            ${
+              it.analise.comercio
+                ? `<div class="sec comercio"><b>Comércio:</b> ${escapeHtml(
+                    it.analise.comercio
+                  )}</div>`
+                : ""
+            }
+            ${
+              it.analise.tecnica
+                ? `<div class="sec tecnica"><b>Análise Técnica:</b> ${escapeHtml(
+                    it.analise.tecnica
+                  )}</div>`
+                : ""
+            }
+            ${
+              it.analise.sugestao
+                ? `<div class="sec sugestao"><b>Sugestão CGIM:</b> ${escapeHtml(
+                    it.analise.sugestao
+                  )}</div>`
+                : ""
+            }
           </div>
         `;
       })
@@ -499,7 +602,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
       </html>
     `;
 
-    // Abre via Blob URL (robusto para Chrome/Edge/Win)
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
 
@@ -507,7 +609,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
     if (w && !w.closed) {
       const revoke = () => URL.revokeObjectURL(url);
       const timer = setTimeout(revoke, 60_000);
-      // Alguns navegadores não disparam onload do window; o script inline imprime de qualquer forma
       w.addEventListener?.("load", () => {
         clearTimeout(timer);
         setTimeout(revoke, 10_000);
@@ -515,7 +616,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
       return;
     }
 
-    // Fallback: iframe oculto
     const iframe = document.createElement("iframe");
     iframe.style.position = "fixed";
     iframe.style.right = "0";
@@ -548,7 +648,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
         </p>
       </div>
 
-      {/* Barra de ações (abaixo do texto) */}
+      {/* Barra de ações */}
       <div className="mb-6 flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
@@ -566,7 +666,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
             </select>
           </div>
 
-          {/* separador flexível para empurrar botões à direita quando houver espaço */}
           <div className="grow" />
 
           <div className="flex flex-wrap items-center gap-2">
@@ -590,7 +689,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
               Imprimir
             </button>
 
-            {/* Discreto: imprimir completo */}
             <button
               className="px-3 py-2 text-sm text-slate-500 hover:text-slate-700 underline decoration-dotted disabled:opacity-60"
               onClick={imprimirCompleto}
@@ -609,7 +707,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
         <div className="space-y-4">
           {/* Cards — SOMENTE Técnica + Sugestão */}
           {itensTS.map((it) => (
-            <div key={`${it.atribId || it.indice}-${it.ncm}-${it.produto}`} className="rounded-xl border bg-white p-4">
+            <div key={it.atribId || it.indice} className="rounded-xl border bg-white p-4">
               <div className="flex items-center justify-between">
                 <div className="text-lg font-semibold">
                   {it.indice}. NCM {it.ncm}
