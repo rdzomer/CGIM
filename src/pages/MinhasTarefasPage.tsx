@@ -8,6 +8,8 @@ import {
   query,
   where,
   documentId,
+  orderBy,
+  limit,
   Query,
   DocumentData,
 } from "firebase/firestore";
@@ -64,7 +66,27 @@ type Atribuicao = {
 };
 
 type AnyRow = Record<string, any>;
-type PautaDoc = any;
+
+type PautaDoc = {
+  id: string;
+  title?: string;
+  slug?: string;
+  arquivo?: string;
+  meeting?: string;
+  reuniao?: string;
+  meetingDate?: any;
+  updatedAt?: any;
+  createdAt?: any;
+  isRetificadora?: boolean;
+  revIndex?: number;
+  diffResumo?: { baseId?: string } | null;
+
+  secoes?: any[];
+  sections?: any[];
+  tabelas?: any[];
+  tables?: any[];
+  pleitos?: any[];
+};
 
 /* ==================== Helpers ==================== */
 const norm = (s?: string) =>
@@ -99,7 +121,6 @@ const fmtNCM = (s?: string) => {
   return n8.length === 8 ? `${n8.slice(0, 4)}.${n8.slice(4, 6)}.${n8.slice(6, 8)}` : renderStr(s);
 };
 
-/* ====== nomes prováveis com base no e-mail ====== */
 function emailToLikelyNames(email?: string): string[] {
   if (!email) return [];
   const local = email.split("@")[0] || "";
@@ -213,6 +234,70 @@ async function getRemovedKeysByBaseIds(db: any, baseIds: string[]): Promise<Reco
         }
       });
     } catch {}
+  }
+  return out;
+}
+
+/** Lista pautas recentes com fallbacks. */
+async function fetchRecentPautasRobusto(db: any, max = 24): Promise<PautaDoc[]> {
+  const col = collection(db, "pautas");
+  try {
+    const snap = await getDocs(query(col, orderBy("meetingDate", "desc"), limit(max)));
+    const arr: PautaDoc[] = [];
+    snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
+    if (arr.length) return arr;
+  } catch {}
+  try {
+    const snap = await getDocs(query(col, orderBy("updatedAt", "desc"), limit(max)));
+    const arr: PautaDoc[] = [];
+    snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
+    if (arr.length) return arr;
+  } catch {}
+  try {
+    const snap = await getDocs(query(col, limit(max)));
+    const arr: PautaDoc[] = [];
+    snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
+    return arr;
+  } catch {
+    return [];
+  }
+}
+
+/** Calcula vN (número da versão) para retificadoras:
+ * - usa revIndex quando existir (vN = revIndex + 1)
+ * - senão, consulta TODAS as retificações daquela base, ordena por createdAt/updatedAt asc e infere vN (primeira ⇒ v2)
+ */
+async function computeVersionNumbers(
+  db: any,
+  list: PautaDoc[]
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  // 1) já preenche usando revIndex
+  for (const p of list) {
+    if (typeof p.revIndex === "number") out.set(p.id, p.revIndex + 1);
+  }
+  // 2) para as que têm baseId e NÃO têm revIndex, buscamos do Firestore
+  const baseIds = Array.from(
+    new Set(
+      list
+        .filter((p) => p?.diffResumo?.baseId && typeof p.revIndex !== "number")
+        .map((p) => String(p.diffResumo?.baseId))
+        .filter(Boolean)
+    )
+  );
+  for (const baseId of baseIds) {
+    try {
+      const snap = await getDocs(query(collection(db, "pautas"), where("diffResumo.baseId", "==", baseId)));
+      const arr = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as PautaDoc[];
+      // Ordena pela data de criação (fallback updatedAt)
+      arr.sort((a, b) => (toMillis(a.createdAt) || toMillis(a.updatedAt)) - (toMillis(b.createdAt) || toMillis(b.updatedAt)));
+      arr.forEach((p, i) => {
+        const vN = typeof p.revIndex === "number" ? p.revIndex + 1 : i + 2;
+        out.set(p.id, vN);
+      });
+    } catch {
+      /* ignore */
+    }
   }
   return out;
 }
@@ -340,6 +425,34 @@ async function findBestPriorAnalysisId(
 /* ==================== Componente ==================== */
 const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"]; // Novo, Em análise, Concluído
 
+// Monta rótulo amigável: adiciona (RETIFICADA vN) quando aplicável
+function makePautaLabel(p: PautaDoc, versionMap?: Map<string, number>): string {
+  const baseTitle =
+    renderStr(p.title, "") ||
+    renderStr(p.reuniao, "") ||
+    renderStr(p.meeting, "") ||
+    renderStr(p.slug, "");
+
+  const ts =
+    toMillis(p.meetingDate) ||
+    toMillis(p.updatedAt) ||
+    toMillis(p.createdAt);
+
+  const mesAno = ts
+    ? new Date(ts).toLocaleDateString("pt-BR", { month: "long", year: "numeric" })
+    : "";
+
+  const isRet =
+    !!(p?.diffResumo?.baseId || p?.isRetificadora) ||
+    /retificad/i.test(String(baseTitle)) ||
+    /retificad/i.test(String(p.arquivo || ""));
+
+  const vN = versionMap?.get(p.id);
+
+  const prefix = baseTitle || (mesAno ? `Reunião do CAT — ${mesAno}` : p.id);
+  return `${prefix}${isRet ? ` (RETIFICADA${vN ? ` v${vN}` : ""})` : ""}`;
+}
+
 const MinhasTarefasPage: React.FC = () => {
   const db = getFirestore();
   const nav = useNavigate();
@@ -350,8 +463,49 @@ const MinhasTarefasPage: React.FC = () => {
   const [copyLoading, setCopyLoading] = useState<Record<string, boolean>>({});
   const [priorMap, setPriorMap] = useState<Record<string, string | null>>({}); // atrId -> priorId (ou null)
 
+  // ====== PAUTAS (seletor) ======
+  const [pautas, setPautas] = useState<PautaDoc[]>([]);
+  const [pautaId, setPautaId] = useState<string>("");
+  const [isLoadingPautas, setIsLoadingPautas] = useState<boolean>(true);
+  const [versionMap, setVersionMap] = useState<Map<string, number>>(new Map()); // pautaId -> vN
+
+  // Carrega pautas (robusto) e calcula vN
   useEffect(() => {
     if (authLoading) return;
+    (async () => {
+      setIsLoadingPautas(true);
+      try {
+        let list = await fetchRecentPautasRobusto(db, 24);
+
+        // Derivar via atribuições se vazio
+        if ((!list || list.length === 0) && user) {
+          const mine = await fetchAtribuicoesDoUsuario(db, user);
+          const ids = Array.from(new Set(mine.map((m) => m.pautaId).filter(Boolean))) as string[];
+          if (ids.length) {
+            const map = await getPautasByIdsCached(db, ids);
+            list = ids.map((id) => map[id]).filter(Boolean) as PautaDoc[];
+            list.sort((a, b) => toMillis(b.meetingDate) - toMillis(a.meetingDate));
+          }
+        }
+
+        setPautas(list || []);
+        if (!pautaId && list && list.length) setPautaId(list[0].id);
+
+        // calcula versões (vN) para exibição
+        const vmap = await computeVersionNumbers(db, list || []);
+        setVersionMap(vmap);
+      } catch {
+        setPautas([]);
+        setVersionMap(new Map());
+      } finally {
+        setIsLoadingPautas(false);
+      }
+    })();
+  }, [db, authLoading, user]);
+
+  // carrega atribuições do usuário e aplica filtro por pauta
+  useEffect(() => {
+    if (authLoading || !pautaId) return;
     (async () => {
       setLoading(true);
       try {
@@ -364,14 +518,15 @@ const MinhasTarefasPage: React.FC = () => {
         // 1) atribuições do usuário
         const mine = await fetchAtribuicoesDoUsuario(db, user);
 
-        // 2) DEDUPE por pauta: chave = pautaId|pleitoKey (fallback pautaId|NCM8|Produto)
+        // 2) Filtrar por pauta selecionada
+        const mineScoped = mine.filter((a) => (a.pautaId || "") === pautaId);
+
+        // 3) DEDUPE por pauta (já é single pauta)
         const byScopedKey = new Map<string, Atribuicao>();
-        for (const a of mine) {
+        for (const a of mineScoped) {
           const ncm8 = onlyDigits(a.ncm).slice(0, 8);
           const produtoNk = normKey(a.produto || "");
-          const scopedKey = `${norm(a.pautaId)}|${
-            norm(a.pleitoKey) || `${ncm8}|${produtoNk}`
-          }`;
+          const scopedKey = `${norm(a.pautaId)}|${norm(a.pleitoKey) || `${ncm8}|${produtoNk}`}`;
 
           const prev = byScopedKey.get(scopedKey);
           if (!prev) byScopedKey.set(scopedKey, a);
@@ -389,57 +544,53 @@ const MinhasTarefasPage: React.FC = () => {
         }
         const merged = Array.from(byScopedKey.values());
 
-        // 3) completar dados a partir da pauta (com cache)
-        const need = merged.filter(
-          (l) => !(l.ncm && l.produto && l.tipoPleito && l.tituloSecao)
-        );
+        // 4) completar dados a partir da pauta (com cache)
+        const need = merged.filter((l) => !(l.ncm && l.produto && l.tipoPleito && l.tituloSecao));
         if (need.length) {
-          const pautaIds = Array.from(new Set(need.map((l) => l.pautaId).filter(Boolean))) as string[];
-          const pautas = await getPautasByIdsCached(db, pautaIds);
-          for (const t of need) {
-            const pauta = pautas[t.pautaId || ""];
-            if (!pauta) continue;
+          const pautasMap = await getPautasByIdsCached(db, [pautaId]);
+          const pauta = pautasMap[pautaId];
+          if (pauta) {
             const rows = flattenPleitosFromPauta(pauta);
-
-            // match por key explícita
-            let found: AnyRow | undefined = rows.find((r) => {
-              const k = String((r as any)?.key || (r as any)?.id || "");
-              return t.pleitoKey && k && normKey(k) === normKey(t.pleitoKey);
-            });
-
-            // fallback por key derivada
-            if (!found && t.pleitoKey) {
-              found = rows.find((r) => {
-                const k = tryMakeKeyFromRow(r);
-                return k && normKey(k) === normKey(t.pleitoKey!);
+            for (const t of need) {
+              // match por key explícita
+              let found: AnyRow | undefined = rows.find((r) => {
+                const k = String((r as any)?.key || (r as any)?.id || "");
+                return t.pleitoKey && k && normKey(k) === normKey(t.pleitoKey);
               });
-            }
 
-            // fallback por NCM+Produto
-            if (!found) {
-              const n8 = onlyDigits(t.ncm).slice(0, 8);
-              const prodNk = normKey(t.produto || "");
-              found = rows.find((r) => {
-                const pr = projectLinha(r);
-                return onlyDigits(pr.ncm).slice(0, 8) === n8 && normKey(pr.produto) === prodNk;
-              });
-            }
+              // fallback por key derivada
+              if (!found && t.pleitoKey) {
+                found = rows.find((r) => {
+                  const k = tryMakeKeyFromRow(r);
+                  return k && normKey(k) === normKey(t.pleitoKey!);
+                });
+              }
 
-            if (found) {
-              const pr = projectLinha(found);
-              t.ncm = t.ncm || pr.ncm;
-              t.produto = t.produto || pr.produto;
-              t.pleiteante = t.pleiteante || pr.pleiteante;
-              t.tipoPleito = t.tipoPleito || pr.tipoPleito;
-              t.tituloSecao = t.tituloSecao || String((found as any)?.__sec || "");
+              // fallback por NCM+Produto
+              if (!found) {
+                const n8 = onlyDigits(t.ncm).slice(0, 8);
+                const prodNk = normKey(t.produto || "");
+                found = rows.find((r) => {
+                  const pr = projectLinha(r);
+                  return onlyDigits(pr.ncm).slice(0, 8) === n8 && normKey(pr.produto) === prodNk;
+                });
+              }
+
+              if (found) {
+                const pr = projectLinha(found);
+                t.ncm = t.ncm || pr.ncm;
+                t.produto = t.produto || pr.produto;
+                t.pleiteante = t.pleiteante || pr.pleiteante;
+                t.tipoPleito = t.tipoPleito || pr.tipoPleito;
+                t.tituloSecao = t.tituloSecao || String((found as any)?.__sec || "");
+              }
             }
           }
         }
 
-        // 3.1) marca tarefas cujo pleito foi RETIRADO por retificação
+        // 4.1) marcar RETIRADOS (retificação) somente para a pauta corrente
         try {
-          const baseIds = Array.from(new Set(merged.map((t) => t.pautaId).filter(Boolean))) as string[];
-          const removedByBase = await getRemovedKeysByBaseIds(db, baseIds);
+          const removedByBase = await getRemovedKeysByBaseIds(db, [pautaId]);
           const keyFor = (t: Atribuicao) => {
             const k = String(t.pleitoKey || "");
             if (k) return k;
@@ -450,7 +601,7 @@ const MinhasTarefasPage: React.FC = () => {
             return `${n8}|${normKey(t.produto || "")}|${normKey(t.pleiteante || "")}`;
           };
           for (const t of merged) {
-            const baseId = String(t.pautaId || "");
+            const baseId = pautaId;
             const k = keyFor(t);
             if (baseId && k && removedByBase[baseId]?.has(k)) {
               (t as any).__retirado = true;
@@ -458,7 +609,7 @@ const MinhasTarefasPage: React.FC = () => {
           }
         } catch {}
 
-        // 4) ordenar: em_analise > nao_iniciado > concluido; depois por atualização
+        // 5) ordenar: em_analise > nao_iniciado > concluido; depois por atualização
         merged.sort((a, b) => {
           const rank = (s?: string) => {
             const n = normalizeStatus(s);
@@ -473,10 +624,10 @@ const MinhasTarefasPage: React.FC = () => {
 
         setTarefas(merged);
 
-        // 5) PREFETCH: descobrir se há análise anterior por pleitoKey
+        // 6) PREFETCH: descobrir se há análise anterior por pleitoKey (ignora mesma pauta)
         const entries = await Promise.all(
           merged.map(async (t) => {
-            const prior = await findBestPriorAnalysisId(db, t.pleitoKey, t.pautaId);
+            const prior = await findBestPriorAnalysisId(db, t.pleitoKey, pautaId);
             return [t.id, prior] as const;
           })
         );
@@ -487,9 +638,9 @@ const MinhasTarefasPage: React.FC = () => {
         setLoading(false);
       }
     })();
-  }, [authLoading, user, db]);
+  }, [authLoading, user, db, pautaId]);
 
-  // ====== gráfico de status ======
+  // ====== gráfico de status (com base no filtro atual) ======
   const resumo = useMemo(() => {
     const c = { em_analise: 0, nao_iniciado: 0, concluido: 0 };
     for (const t of tarefas) c[normalizeStatus(t.status) as keyof typeof c]++;
@@ -511,7 +662,7 @@ const MinhasTarefasPage: React.FC = () => {
     const el = document.activeElement as HTMLElement | null;
     el?.blur?.();
     nav(url);
-  }
+  };
 
   function onReaproveitar(t: Atribuicao) {
     const sourceId = priorMap[t.id] || null;
@@ -558,10 +709,37 @@ const MinhasTarefasPage: React.FC = () => {
     </div>
   );
 
+  const pautaSelect = useMemo(() => {
+    if (isLoadingPautas) {
+      return <span className="text-sm text-gray-400">carregando pautas…</span>;
+    }
+    if (!pautas.length) {
+      return <span className="text-sm text-gray-400">nenhuma pauta encontrada ou sem permissão</span>;
+    }
+    return (
+      <select
+        className="border rounded px-2 py-1"
+        value={pautaId}
+        onChange={(e) => setPautaId(e.target.value)}
+        aria-label="Selecionar pauta"
+      >
+        {pautas.map((p) => (
+          <option key={p.id} value={p.id}>
+            {makePautaLabel(p, versionMap)}
+          </option>
+        ))}
+      </select>
+    );
+  }, [pautas, pautaId, isLoadingPautas, versionMap]);
+
   return (
     <div className="w-full space-y-6 p-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <h1 className="text-2xl font-semibold">Minhas Tarefas</h1>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-600">Filtrar por pauta:</span>
+          {pautaSelect}
+        </div>
       </div>
 
       {/* Resumo + gráfico de status */}
@@ -600,7 +778,7 @@ const MinhasTarefasPage: React.FC = () => {
         </div>
       </div>
 
-      {/* ====== Cards (visual “antigo” em cards) ====== */}
+      {/* ====== Cards ====== */}
       <div className="w-full">
         {/* carregando */}
         {loading && (
@@ -616,7 +794,7 @@ const MinhasTarefasPage: React.FC = () => {
           <>
             {tarefas.length === 0 ? (
               <div className="rounded-xl border bg-white/70 p-8 text-center text-slate-600">
-                Nenhuma tarefa atribuída a você.
+                {pautaId ? "Nenhuma tarefa atribuída a você nesta pauta." : "Selecione uma pauta para listar suas tarefas."}
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">

@@ -1,6 +1,7 @@
 // src/pages/PautaCatPage.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
+import { useNavigate } from "react-router-dom";
 
 import {
   salvarPautaNoFirestoreAuto,
@@ -11,37 +12,36 @@ import {
 } from "../services/pautaService";
 
 import { getNcmSetCgim } from "../services/ncmsService";
-
 import {
   carregarAtribuicoesPorChaves,
   gerarPleitoKey,
   salvarAtribuicaoPleito,
 } from "../services/atribuicoesService";
 
-import { useNavigate } from "react-router-dom";
+// Firestore (para atualizar metadados e, se preciso, localizar pauta pelo hash)
+import {
+  getFirestore,
+  doc,
+  updateDoc,
+  serverTimestamp,
+  Timestamp,
+  collection,
+  getDocs,
+  query as fsQuery,
+  where,
+  limit as fsLimit,
+} from "firebase/firestore";
 
 // >>> serviço de versionamento/diff entre pautas
 import { diffPautas } from "../services/pautaVersioningCompat";
 
 // ---------------- ANALISTAS PADRÃO ----------------
-const ANALISTAS = [
-  "Ricardo Zomer",
-  "Pedro Reckziegel",
-  "Antônio Azambuja",
-  "Tólio Ribeiro",
-] as const;
+const ANALISTAS = ["Ricardo Zomer", "Pedro Reckziegel", "Antônio Azambuja", "Tólio Ribeiro"] as const;
 
 // ---------------- helpers ----------------
-const norm = (s: string) =>
-  (s || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-
-const normKey = (s: string) =>
-  norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-
-function onlyDigits(s: string | undefined | null): string {
-  if (!s) return "";
-  return String(s).replace(/\D+/g, "");
-}
+const norm = (s: string) => (s || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
+const normKey = (s: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+function onlyDigits(s: string | undefined | null): string { if (!s) return ""; return String(s).replace(/\D+/g, ""); }
 
 function isHeaderLikely(h: string) {
   const k = normKey(h);
@@ -75,13 +75,11 @@ function dedupeHeaders(headers: string[]) {
 function decodeHtmlBest(buf: ArrayBuffer): string {
   const utf = new TextDecoder("utf-8", { fatal: false }).decode(buf);
   const iso = new TextDecoder("iso-8859-1").decode(buf);
-
   const score = (s: string) => {
     const bad = (s.match(/Ã.|Â.|�/g) || []).length;
     const good = (s.match(/[áéíóúãõâêôçÁÉÍÓÚÃÕÂÊÔÇ]/g) || []).length;
     return bad * 10 - good;
   };
-
   const sUtf = score(utf);
   const sIso = score(iso);
   if (sUtf === sIso) {
@@ -96,7 +94,6 @@ function decodeHtmlBest(buf: ArrayBuffer): string {
 function extrairMeeting(html: string): string | null {
   try {
     const dom = new DOMParser().parseFromString(html, "text/html");
-
     const pick = (texts: string[]) => {
       for (const t of texts) {
         const s = (t || "").replace(/\s+/g, " ").trim();
@@ -109,22 +106,13 @@ function extrairMeeting(html: string): string | null {
       }
       return null;
     };
-
-    const strongs = Array.from(dom.querySelectorAll("strong,b")).map(
-      (el) => el.textContent || ""
-    );
+    const strongs = Array.from(dom.querySelectorAll("strong,b")).map((el) => el.textContent || "");
     let found = pick(strongs);
     if (found) return found;
-
-    const headers = Array.from(
-      dom.querySelectorAll("h1,h2,h3,h4")
-    ).map((el) => el.textContent || "");
+    const headers = Array.from(dom.querySelectorAll("h1,h2,h3,h4")).map((el) => el.textContent || "");
     found = pick(headers);
     if (found) return found;
-
-    const bodyLines = (dom.body?.innerText || dom.body?.textContent || "")
-      .split(/\n+/)
-      .slice(0, 60);
+    const bodyLines = (dom.body?.innerText || dom.body?.textContent || "").split(/\n+/).slice(0, 60);
     found = pick(bodyLines);
     if (found) return found;
   } catch {}
@@ -136,25 +124,61 @@ function extrairMeeting(html: string): string | null {
   return m3 ? `${m3[1]}ª` : null;
 }
 
+// ====== Parse data (pt-BR) a partir do texto da reunião ======
+function parseMeetingDatePtBR(s?: string): Date | null {
+  if (!s) return null;
+  // dd/mm/aaaa ou dd-mm-aaaa
+  const m = s.match(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+  if (m) {
+    const d = parseInt(m[1], 10);
+    const mo = parseInt(m[2], 10) - 1;
+    const y = parseInt(m[3].length === 2 ? `20${m[3]}` : m[3], 10);
+    const dt = new Date(y, mo, d);
+    if (!isNaN(dt.getTime())) return dt;
+  }
+  // “22 de setembro de 2025”
+  const meses = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"];
+  const re = new RegExp(`(\\d{1,2})\\s+de\\s+(${meses.join("|")})\\s+de\\s+(\\d{4})`, "i");
+  const m2 = s.match(re);
+  if (m2) {
+    const d = parseInt(m2[1], 10);
+    const mo = meses.findIndex(mz => mz.toLowerCase() === m2[2].toLowerCase());
+    const y = parseInt(m2[3], 10);
+    const dt = new Date(y, mo < 0 ? 0 : mo, d);
+    if (!isNaN(dt.getTime())) return dt;
+  }
+  return null;
+}
+
+function makeSlugFromTitle(title?: string, dt?: Date | null): string {
+  if (title) {
+    return norm(title)
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80);
+  }
+  if (dt) {
+    const mm = (dt.getMonth() + 1).toString().padStart(2, "0");
+    return `pauta-cat-${dt.getFullYear()}-${mm}`;
+  }
+  return "";
+}
+
 function findSectionTitle(fromEl: Element): string | null {
   let el: Element | null = fromEl.previousElementSibling;
   const candidates: string[] = [];
   for (let i = 0; i < 50 && el; i++, el = el.previousElementSibling) {
     const tag = el.tagName;
-    const txtEl = (/(H1|H2|H3|H4)/.test(tag)
-      ? el
-      : el.querySelector("b, strong")) as Element | null;
+    const txtEl = (/(H1|H2|H3|H4)/.test(tag) ? el : el.querySelector("b, strong")) as Element | null;
     const txt = (txtEl && (txtEl.textContent || "").trim()) || "";
     if (txt) candidates.push(txt.replace(/\s+/g, " ").trim());
   }
   if (candidates.length === 0) return null;
-
   const numbered = candidates.find((t) => /^\d+(?:\.\d+){0,3}\s+/.test(t));
   if (numbered) return numbered;
-
   const kw = candidates.find((t) => /(Pleitos|CCM|CAT|LETEC|Mercosul)/i.test(t));
   if (kw) return kw;
-
   return candidates[0];
 }
 
@@ -162,25 +186,15 @@ function parsePautaHtml(html: string) {
   const dom = new DOMParser().parseFromString(html, "text/html");
   const allTables = Array.from(dom.querySelectorAll("table"));
 
-  const secoesBrutas: {
-    titulo: string;
-    headers: string[];
-    rows: Record<string, string>[];
-  }[] = [];
+  const secoesBrutas: { titulo: string; headers: string[]; rows: Record<string, string>[] }[] = [];
   let totalItens = 0;
 
   for (const tb of allTables) {
     const firstRow = tb.querySelector("tr");
     if (!firstRow) continue;
 
-    let rawHeaders = Array.from(firstRow.querySelectorAll("th")).map((th) =>
-      norm(th.textContent || "")
-    );
-    if (rawHeaders.length === 0) {
-      rawHeaders = Array.from(firstRow.querySelectorAll("td")).map((td) =>
-        norm(td.textContent || "")
-      );
-    }
+    let rawHeaders = Array.from(firstRow.querySelectorAll("th")).map((th) => norm(th.textContent || ""));
+    if (rawHeaders.length === 0) rawHeaders = Array.from(firstRow.querySelectorAll("td")).map((td) => norm(td.textContent || ""));
     if (rawHeaders.length === 0) continue;
 
     const hits = rawHeaders.filter(isHeaderLikely).length;
@@ -193,16 +207,13 @@ function parsePautaHtml(html: string) {
     for (const tr of dataRows) {
       const tds = Array.from(tr.querySelectorAll("td"));
       if (tds.length === 0) continue;
-
       const rec: Record<string, string> = {};
       tds.forEach((td, i) => {
         const key = headers[i] || `Col_${i + 1}`;
         rec[key] = norm(td.textContent || "");
       });
-
       if (Object.values(rec).some((v) => v.length > 0)) rows.push(rec);
     }
-
     if (rows.length === 0) continue;
 
     const titulo = findSectionTitle(tb) || "Seção";
@@ -210,39 +221,22 @@ function parsePautaHtml(html: string) {
     totalItens += rows.length;
   }
 
-  const byTitle = new Map<
-    string,
-    { headers: string[]; rows: Record<string, string>[] }
-  >();
+  const byTitle = new Map<string, { headers: string[]; rows: Record<string, string>[] }>();
   for (const s of secoesBrutas) {
-    if (!byTitle.has(s.titulo))
-      byTitle.set(s.titulo, { headers: s.headers, rows: [] });
+    if (!byTitle.has(s.titulo)) byTitle.set(s.titulo, { headers: s.headers, rows: [] });
     byTitle.get(s.titulo)!.rows.push(...s.rows);
   }
 
   const numKey = (t: string) => t.match(/^(\d+(?:\.\d+){0,3})/)?.[1] ?? "";
   const secoes = Array.from(byTitle.entries())
-    .map(([titulo, v]) => ({
-      titulo,
-      headers: v.headers,
-      rows: v.rows,
-      qtd: v.rows.length,
-    }))
+    .map(([titulo, v]) => ({ titulo, headers: v.headers, rows: v.rows, qtd: v.rows.length }))
     .sort((a, b) => (numKey(a.titulo) > numKey(b.titulo) ? 1 : -1));
 
-  return {
-    secoes,
-    stats: { secoes: secoes.length, tabelas: secoesBrutas.length, itens: totalItens },
-  };
+  return { secoes, stats: { secoes: secoes.length, tabelas: secoesBrutas.length, itens: totalItens } };
 }
 
 // ---------------- tipos locais p/ render ----------------
-type Secao = {
-  titulo: string;
-  headers: string[];
-  rows: Record<string, string>[];
-  qtd: number;
-};
+type Secao = { titulo: string; headers: string[]; rows: Record<string, string>[]; qtd: number; };
 type Stats = { secoes: number; tabelas: number; itens: number };
 
 type HistoricoItem = {
@@ -252,32 +246,53 @@ type HistoricoItem = {
   createdAt?: any;
   itens?: number;
   tabelas?: number;
-  // Em alguns registros antigos pode vir "secoes" como número OU como array de seções.
   secoes?: number | Secao[];
   meeting?: string | null;
 };
+
+const db = getFirestore();
+
+// ==== helpers de metadado legível ====
+function friendlyTitle(meeting?: string | null, dt?: Date | null) {
+  if (meeting && norm(meeting)) return norm(meeting);
+  if (dt) {
+    const s = dt.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+    return `Reunião CAT — ${s[0].toUpperCase()}${s.slice(1)}`;
+  }
+  return "Reunião CAT";
+}
+
+async function upsertPautaMetadata(pautaId: string, fileName: string, meeting: string | null) {
+  const dt = parseMeetingDatePtBR(meeting || "");
+  const title = friendlyTitle(meeting, dt);
+  const slug = makeSlugFromTitle(title, dt);
+  const data: any = {
+    title,
+    slug,
+    meeting: meeting || null,
+    tituloArquivo: fileName || null,
+    updatedAt: serverTimestamp(),
+  };
+  if (dt) data.meetingDate = Timestamp.fromDate(dt);
+  await updateDoc(doc(db, "pautas", pautaId), data);
+}
 
 // ---------------- componente ----------------
 const PautaCatPage: React.FC = () => {
   const navigate = useNavigate();
   const [secoes, setSecoes] = useState<Secao[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [dupInfo, setDupInfo] = useState<null | { fileName: string; buf: ArrayBuffer }>(null);
+  const [dupInfo, setDupInfo] = useState<null | { fileName: string; buf: ArrayBuffer; fileHash?: string }>(null);
   const [firestoreBadge, setFirestoreBadge] = useState<"novo" | "dup" | null>(null);
   const [historico, setHistorico] = useState<HistoricoItem[]>([]);
   const [currentPautaId, setCurrentPautaId] = useState<string | null>(null);
 
   // >>> DIF entre pautas
   const [pautaBaseId, setPautaBaseId] = useState<string>("");
-  const [diffResumo, setDiffResumo] = useState<null | {
-    removidos: number;
-    alterados: number;
-    mantidos: number;
-    novos: number;
-  }>(null);
+  const [diffResumo, setDiffResumo] = useState<null | { removidos: number; alterados: number; mantidos: number; novos: number }>(null);
 
   // --- CGIM filter ---
-  const [somenteCgim, setSomenteCgim] = useState<boolean>(true); // ativo por padrão
+  const [somenteCgim, setSomenteCgim] = useState<boolean>(true);
   const [ncmSet, setNcmSet] = useState<Set<string>>(new Set());
 
   // --- ATRIBUIÇÕES ---
@@ -286,15 +301,11 @@ const PautaCatPage: React.FC = () => {
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    getNcmSetCgim()
-      .then(setNcmSet)
-      .catch(() => setNcmSet(new Set()));
+    getNcmSetCgim().then(setNcmSet).catch(() => setNcmSet(new Set()));
   }, []);
 
   useEffect(() => {
-    listarPautas(5)
-      .then((arr: any[]) => setHistorico(arr as HistoricoItem[]))
-      .catch(() => {});
+    listarPautas(5).then((arr: any[]) => setHistorico(arr as HistoricoItem[])).catch(() => {});
   }, []);
 
   // reabrir última pauta ao voltar
@@ -316,10 +327,10 @@ const PautaCatPage: React.FC = () => {
     }
   }, []);
 
-  // abrir automaticamente a pauta mais recente ao entrar na página
+  // abrir automaticamente a pauta mais recente
   useEffect(() => {
-    if (currentPautaId) return; // já existe aberta
-    if (!historico.length) return; // histórico ainda não carregado
+    if (currentPautaId) return;
+    if (!historico.length) return;
     (async () => {
       try {
         const latest = historico[0];
@@ -328,16 +339,12 @@ const PautaCatPage: React.FC = () => {
         setStats(full.stats || null);
         setCurrentPautaId(latest.id);
         setFirestoreBadge(null);
-        setSomenteCgim(true); // garante filtro ativo
-      } catch {
-        // silencioso
-      }
+        setSomenteCgim(true);
+      } catch {}
     })();
   }, [historico, currentPautaId]);
 
-  function abrirFileDialog() {
-    inputRef.current?.click();
-  }
+  function abrirFileDialog() { inputRef.current?.click(); }
 
   const processarHTML = async (file: File, buf: ArrayBuffer) => {
     const html = decodeHtmlBest(buf);
@@ -347,15 +354,12 @@ const PautaCatPage: React.FC = () => {
     setStats(stats);
 
     const fileHash = await hashDoArquivo(buf);
-    const pautaId = await (salvarPautaNoFirestoreAuto as any)(
-      file.name,
-      fileHash,
-      secoes,
-      stats,
-      meeting
-    );
+    const pautaId = await (salvarPautaNoFirestoreAuto as any)(file.name, fileHash, secoes, stats, meeting);
 
     if (pautaId) {
+      // >>> grava metadados legíveis assim que salva
+      try { await upsertPautaMetadata(pautaId, file.name, meeting || null); } catch {}
+
       setCurrentPautaId(pautaId);
       setFirestoreBadge("novo");
       setDupInfo(null);
@@ -374,26 +378,22 @@ const PautaCatPage: React.FC = () => {
         ].slice(0, 5)
       );
 
-      // aplica diff se houve pauta base informada
+      // aplica diff se houver pauta base informada
       try {
         if (pautaBaseId && pautaBaseId !== pautaId) {
           const resumo = await diffPautas(pautaBaseId, pautaId, { aplicarMarcacoes: true });
           if (resumo?.contagens) {
             setDiffResumo(resumo.contagens);
-            toast.success(
-              `Diferenças aplicadas: ${resumo.contagens.removidos} removidos, ${resumo.contagens.alterados} alterados, ${resumo.contagens.novos} novos.`
-            );
+            toast.success(`Diferenças: ${resumo.contagens.removidos} removidos · ${resumo.contagens.alterados} alterados · ${resumo.contagens.novos} novos.`);
           }
-        } else {
-          setDiffResumo(null);
-        }
+        } else setDiffResumo(null);
       } catch (e) {
         console.error(e);
         toast.error("Falha ao comparar pautas (diff).");
       }
     } else {
       setFirestoreBadge("dup");
-      setDupInfo({ fileName: file.name, buf });
+      setDupInfo({ fileName: file.name, buf, fileHash });
     }
 
     toast.success(`Pauta (HTML) processada: ${stats.itens} itens em ${stats.secoes} seções`);
@@ -403,80 +403,95 @@ const PautaCatPage: React.FC = () => {
     try {
       const buf = await file.arrayBuffer();
       const name = (file.name || "").toLowerCase();
-      // Nesta página, só processamos HTML da pauta
-      if (name.endsWith(".html") || name.endsWith(".htm")) {
-        await processarHTML(file, buf);
-      } else {
-        // fallback simples: tratar como HTML
-        await processarHTML(file, buf);
-      }
+      if (name.endsWith(".html") || name.endsWith(".htm")) await processarHTML(file, buf);
+      else await processarHTML(file, buf); // fallback simples
     } catch (err: any) {
       console.error(err);
       toast.error("Falha ao processar o arquivo HTML");
     }
   };
 
+  // ==== NOVO: sobrescrever por ID (pauta aberta) OU localizar por hash como fallback ====
   const reprocessarESobrescrever = async () => {
     if (!dupInfo) return;
     try {
       const buf = dupInfo.buf;
-
-      let meeting: string | null = null;
-      let novo: { secoes: Secao[]; stats: Stats };
-
-      // Reprocessa sempre como HTML nesta página
       const html = decodeHtmlBest(buf);
-      meeting = extrairMeeting(html);
-      novo = parsePautaHtml(html) as any;
+      const meeting = extrairMeeting(html);
+      const novo = parsePautaHtml(html) as any;
 
+      // 1) Se há pauta aberta, sobrescreve por ID (sem hash)
+      if (currentPautaId) {
+        await updateDoc(doc(db, "pautas", currentPautaId), {
+          secoes: novo.secoes,
+          stats: novo.stats,
+          meeting: meeting || null,
+          tituloArquivo: dupInfo.fileName,
+          updatedAt: serverTimestamp(),
+        });
+        await upsertPautaMetadata(currentPautaId, dupInfo.fileName, meeting || null);
+        setSecoes(novo.secoes);
+        setStats(novo.stats);
+        setFirestoreBadge("novo");
+        setDupInfo(null);
+        toast.success("Pauta regravada (por ID da pauta aberta).");
+
+        // aplica diff se houver pauta base
+        try {
+          if (pautaBaseId && pautaBaseId !== currentPautaId) {
+            const resumo = await diffPautas(pautaBaseId, currentPautaId, { aplicarMarcacoes: true });
+            if (resumo?.contagens) {
+              setDiffResumo(resumo.contagens);
+              toast.success(`Diferenças: ${resumo.contagens.removidos} rem. · ${resumo.contagens.alterados} alt. · ${resumo.contagens.novos} novos.`);
+            }
+          } else setDiffResumo(null);
+        } catch (e) {
+          console.error(e);
+          toast.error("Falha ao comparar pautas (diff).");
+        }
+        return;
+      }
+
+      // 2) Mantém compat: tenta service por HASH
       const fileHash = await hashDoArquivo(buf);
-      const id = await (regravarPautaPorHash as any)(fileHash, {
+      const idByService = await (regravarPautaPorHash as any)(fileHash, {
         secoes: novo.secoes,
         stats: novo.stats,
         tituloArquivo: dupInfo.fileName,
         meeting,
       });
-      if (id) {
-        setCurrentPautaId(id);
+      if (idByService) {
+        await upsertPautaMetadata(idByService, dupInfo.fileName, meeting || null);
+        setCurrentPautaId(idByService);
         setSecoes(novo.secoes);
         setStats(novo.stats);
-        toast.success("Arquivo regravado com sucesso.");
         setFirestoreBadge("novo");
         setDupInfo(null);
-        setHistorico((h) =>
-          h.map((p) =>
-            p.hash === fileHash
-              ? {
-                  ...p,
-                  meeting,
-                  itens: novo.stats.itens,
-                  tabelas: novo.stats.tabelas,
-                  secoes: novo.stats.secoes,
-                }
-              : p
-          )
-        );
-
-        // aplica diff após regravar, se houver pauta base
-        try {
-          if (pautaBaseId && pautaBaseId !== id) {
-            const resumo = await diffPautas(pautaBaseId, id, { aplicarMarcacoes: true });
-            if (resumo?.contagens) {
-              setDiffResumo(resumo.contagens);
-              toast.success(
-                `Diferenças aplicadas: ${resumo.contagens.removidos} removidos, ${resumo.contagens.alterados} alterados, ${resumo.contagens.novos} novos.`
-              );
-            }
-          } else {
-            setDiffResumo(null);
-          }
-        } catch (e) {
-          console.error(e);
-          toast.error("Falha ao comparar pautas (diff).");
-        }
-      } else {
-        toast.error("Hash não encontrado para sobrescrever.");
+        toast.success("Pauta regravada (compat por hash).");
+        return;
       }
+
+      // 3) Fallback: localizar pauta pelo hash diretamente no Firestore
+      try {
+        const snap = await getDocs(fsQuery(collection(db, "pautas"), where("hash", "==", fileHash), fsLimit(1)));
+        const id = snap.docs[0]?.id;
+        if (id) {
+          await updateDoc(doc(db, "pautas", id), {
+            secoes: novo.secoes, stats: novo.stats, meeting: meeting || null,
+            tituloArquivo: dupInfo.fileName, updatedAt: serverTimestamp(),
+          });
+          await upsertPautaMetadata(id, dupInfo.fileName, meeting || null);
+          setCurrentPautaId(id);
+          setSecoes(novo.secoes);
+          setStats(novo.stats);
+          setFirestoreBadge("novo");
+          setDupInfo(null);
+          toast.success("Pauta regravada (fallback Firestore por hash).");
+          return;
+        }
+      } catch {}
+
+      toast.error("Não foi possível localizar a pauta existente para sobrescrever.");
     } catch (e) {
       console.error(e);
       toast.error("Falha ao regravar.");
@@ -508,7 +523,6 @@ const PautaCatPage: React.FC = () => {
   // Filtradas por CGIM
   const secoesFiltradas = useMemo(() => {
     if (!somenteCgim || ncmSet.size === 0) return secoes;
-
     const fil = secoes.map((sec) => {
       const rows = sec.rows.filter((r) => {
         const ncm = String(r[ncmHeaderName] || "").replace(/\D/g, "");
@@ -525,7 +539,6 @@ const PautaCatPage: React.FC = () => {
       const keys: string[] = [];
       for (const s of secoes) {
         for (const r of s.rows) {
-          // montamos um objeto normalizado com as chaves esperadas pelo service
           const rowForKey = {
             NCM: onlyDigits(String(r[ncmHeaderName] || "")),
             Produto: String(r[produtoHeaderName] || ""),
@@ -534,35 +547,22 @@ const PautaCatPage: React.FC = () => {
           keys.push(gerarPleitoKey(rowForKey));
         }
       }
-      if (!keys.length) {
-        setAtribs({});
-        return;
-      }
-      try {
-        const map = await carregarAtribuicoesPorChaves(keys);
-        setAtribs(map);
-      } catch {
-        setAtribs({});
-      }
+      if (!keys.length) { setAtribs({}); return; }
+      try { const map = await carregarAtribuicoesPorChaves(keys); setAtribs(map); }
+      catch { setAtribs({}); }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [secoes, ncmHeaderName, produtoHeaderName, pleiteanteHeaderName]);
 
   // Handler de atribuição
-  const onAtribuir = async (
-    row: Record<string, string>,
-    tituloSecao: string,
-    novoResp: string
-  ) => {
-    // mesma normalização usada acima
+  const onAtribuir = async (row: Record<string, string>, tituloSecao: string, novoResp: string) => {
     const rowForKey = {
       NCM: onlyDigits(String(row[ncmHeaderName] || "")),
-      Produto: String(row[produtoHeaderName] || ""), // ✅ sem parêntese extra
+      Produto: String(row[produtoHeaderName] || ""),
       Pleiteante: String(row[pleiteanteHeaderName] || ""),
     } as Record<string, string>;
 
     const key = gerarPleitoKey(rowForKey);
-
     try {
       await salvarAtribuicaoPleito({
         pleitoKey: key,
@@ -573,7 +573,6 @@ const PautaCatPage: React.FC = () => {
         pautaId: currentPautaId || undefined,
         tituloSecao,
       });
-
       setAtribs((m) => ({ ...m, [key]: novoResp === "—" ? "" : novoResp }));
       toast.success(novoResp && novoResp !== "—" ? `Atribuído a ${novoResp}` : "Atribuição removida.");
     } catch (e) {
@@ -582,7 +581,7 @@ const PautaCatPage: React.FC = () => {
     }
   };
 
-  // ---- helpers p/ Histórico: normalizar contadores vindos como número ou array ----
+  // ---- helpers p/ Histórico resumido ----
   const histResumo = (() => {
     const h0 = historico[0];
     if (!h0) return null;
@@ -591,23 +590,16 @@ const PautaCatPage: React.FC = () => {
       if (typeof v === "number" && Number.isFinite(v)) return v;
       return fallback;
     };
-    return {
-      secoes: asNum(h0.secoes),
-      tabelas: asNum(h0.tabelas),
-      itens: asNum(h0.itens),
-    };
+    return { secoes: asNum(h0.secoes), tabelas: asNum(h0.tabelas), itens: asNum(h0.itens) };
   })();
 
   return (
-    // <<< Evita estourar largura e “apertar” a sidebar
     <div className="p-6 overflow-x-hidden">
       <h1 className="text-xl font-bold mb-4">Pauta CAT</h1>
 
       {/* Upload */}
       <div className="mb-4 p-4 bg-white rounded border">
-        <p className="mb-2">
-          Importe o arquivo da pauta em <b>.html</b> (exportado do SEI).
-        </p>
+        <p className="mb-2">Importe o arquivo da pauta em <b>.html</b> (exportado do SEI).</p>
 
         {/* Campo para informar a pauta base (ID) e mostrar o resumo do diff */}
         <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -638,55 +630,43 @@ const PautaCatPage: React.FC = () => {
               e.currentTarget.value = "";
             }}
           />
-          <button
-            onClick={abrirFileDialog}
-            className="inline-flex items-center px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded"
-          >
+          <button onClick={abrirFileDialog} className="inline-flex items-center px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded">
             Escolher Arquivo
           </button>
 
           {dupInfo && (
-            <button
-              onClick={reprocessarESobrescrever}
-              className="px-3 py-2 rounded bg-violet-600 text-white hover:bg-violet-700"
-            >
-              Reprocessar e sobrescrever
-            </button>
+            <>
+              <button
+                onClick={reprocessarESobrescrever}
+                className="px-3 py-2 rounded bg-violet-600 text-white hover:bg-violet-700"
+                title="Sobrescreve a pauta ABERTA (por ID) ou tenta localizar por hash"
+              >
+                Reprocessar e sobrescrever
+              </button>
+              <span className="text-xs text-slate-600">
+                Dica: abra a pauta que deseja atualizar e clique em “Reprocessar e sobrescrever”.
+              </span>
+            </>
           )}
 
           {firestoreBadge === "novo" && (
-            <span className="px-2 py-1 text-sm rounded bg-green-100 text-green-800">
-              salvo no Firestore
-            </span>
+            <span className="px-2 py-1 text-sm rounded bg-green-100 text-green-800">salvo no Firestore</span>
           )}
           {firestoreBadge === "dup" && (
-            <span className="px-2 py-1 text-sm rounded bg-yellow-100 text-yellow-800">
-              já existia (hash)
-            </span>
+            <span className="px-2 py-1 text-sm rounded bg-yellow-100 text-yellow-800">já existia (hash)</span>
           )}
 
           {/* Toggle CGIM */}
           <label className="ml-auto inline-flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="h-4 w-4"
-              checked={somenteCgim}
-              onChange={(e) => setSomenteCgim(e.target.checked)}
-            />
+            <input type="checkbox" className="h-4 w-4" checked={somenteCgim} onChange={(e) => setSomenteCgim(e.target.checked)} />
             Apenas NCMs da CGIM
           </label>
         </div>
 
         {stats && (
           <div className="text-sm mt-2 text-gray-600">
-            Seções detectadas: <b>{stats.secoes}</b>{" "}
-            &nbsp;&nbsp; Tabelas consideradas: <b>{stats.tabelas}</b>{" "}
-            &nbsp;&nbsp; Pleitos extraídos: <b>{stats.itens}</b>
-            {somenteCgim ? (
-              <>
-                &nbsp;&nbsp;|&nbsp;&nbsp; <b>Filtro CGIM</b> ativo
-              </>
-            ) : null}
+            Seções detectadas: <b>{stats.secoes}</b> &nbsp;&nbsp; Tabelas consideradas: <b>{stats.tabelas}</b> &nbsp;&nbsp; Pleitos extraídos: <b>{stats.itens}</b>
+            {somenteCgim ? <>&nbsp;&nbsp;|&nbsp;&nbsp; <b>Filtro CGIM</b> ativo</> : null}
           </div>
         )}
       </div>
@@ -695,13 +675,7 @@ const PautaCatPage: React.FC = () => {
       <div className="mb-6 p-4 bg-white rounded border">
         <div className="flex items-center justify-between mb-2">
           <h2 className="font-semibold">Histórico (últimas 5 pautas)</h2>
-          <button
-            type="button"
-            onClick={() => navigate("/historico")}
-            className="text-sm text-blue-600 hover:underline"
-          >
-            ver tudo
-          </button>
+          <button type="button" onClick={() => navigate("/historico")} className="text-sm text-blue-600 hover:underline">ver tudo</button>
         </div>
 
         {historico.length === 0 ? (
@@ -709,20 +683,14 @@ const PautaCatPage: React.FC = () => {
         ) : (
           <div className="text-sm text-gray-700">
             <div className="mb-2 text-gray-600">
-              {histResumo ? (
-                <span>
-                  {histResumo.secoes} seções · {histResumo.tabelas} tabelas · {histResumo.itens} pleitos
-                </span>
-              ) : null}
+              {histResumo ? <span>{histResumo.secoes} seções · {histResumo.tabelas} tabelas · {histResumo.itens} pleitos</span> : null}
             </div>
 
             <div className="flex flex-wrap gap-2">
               {historico.slice(0, 5).map((p) => (
                 <div key={p.id} className="border rounded px-3 py-2 bg-gray-50 min-w-[260px]">
                   <div className="font-medium break-words">{p.tituloArquivo}</div>
-                  <div className="text-xs text-gray-600 mt-1 break-words">
-                    Reunião: <b>{p.meeting ?? "—"}</b>
-                  </div>
+                  <div className="text-xs text-gray-600 mt-1 break-words">Reunião: <b>{p.meeting ?? "—"}</b></div>
 
                   <div className="mt-2 flex gap-2">
                     <button
@@ -750,9 +718,8 @@ const PautaCatPage: React.FC = () => {
         )}
       </div>
 
-      {/* Render das seções (SEM scroll horizontal; células quebram linhas) */}
+      {/* Render das seções */}
       {secoesFiltradas.map((sec, idxSec) => {
-        // remove headers vazios/traços para evitar coluna fantasma
         const baseHeaders = sec.headers.filter((h) => !!norm(h) && norm(h) !== "—");
         const sanitizedHeaders = dedupeHeaders(baseHeaders);
         const headers = [...sanitizedHeaders, "Responsável"];
@@ -764,38 +731,30 @@ const PautaCatPage: React.FC = () => {
               <span className="text-sm text-gray-500">{Number(sec.qtd) || 0} pleitos</span>
             </div>
 
-            {/* Importante: nada de overflow-x aqui */}
             <div>
               <table className="w-full">
-                {/* distribuição aproximada de colunas para estabilidade visual */}
                 <colgroup>
-                  <col style={{ width: "12%" }} />  {/* NCM */}
-                  <col style={{ width: "28%" }} />  {/* Produto */}
-                  <col style={{ width: "18%" }} />  {/* Pleiteante */}
-                  <col style={{ width: "14%" }} />  {/* Redução */}
-                  <col style={{ width: "14%" }} />  {/* Quota */}
-                  <col style={{ width: "20%" }} />  {/* País/Prazo/Situação */}
-                  <col />                           {/* Responsável */}
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "28%" }} />
+                  <col style={{ width: "18%" }} />
+                  <col style={{ width: "14%" }} />
+                  <col style={{ width: "14%" }} />
+                  <col style={{ width: "20%" }} />
+                  <col />
                 </colgroup>
 
                 <thead>
                   <tr className="bg-gray-100">
                     {headers.map((h) => (
-                      <th
-                        key={h}
-                        className="px-4 py-2 text-left align-top text-sm md:text-base whitespace-pre-wrap break-words"
-                      >
-                        {String(h)}
-                      </th>
+                      <th key={h} className="px-4 py-2 text-left align-top text-sm md:text-base whitespace-pre-wrap break-words">{String(h)}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {sec.rows.map((row, rIdx) => {
-                    // valor atual p/ atribuição
                     const rowForKey = {
                       NCM: onlyDigits(String(row[ncmHeaderName] || "")),
-                      Produto: String(row[produtoHeaderName] || ""), // ✅ sem parêntese extra
+                      Produto: String(row[produtoHeaderName] || ""),
                       Pleiteante: String(row[pleiteanteHeaderName] || ""),
                     } as Record<string, string>;
                     const key = gerarPleitoKey(rowForKey);
@@ -811,9 +770,7 @@ const PautaCatPage: React.FC = () => {
                           return (
                             <td
                               key={`${h}-${rIdx}`}
-                              className={`px-4 py-3 align-top text-sm md:text-base whitespace-pre-wrap ${
-                                isNcm ? "break-all" : "break-words"
-                              } ${isProd || isPlei ? "whitespace-pre-wrap" : ""}`}
+                              className={`px-4 py-3 align-top text-sm md:text-base whitespace-pre-wrap ${isNcm ? "break-all" : "break-words"} ${isProd || isPlei ? "whitespace-pre-wrap" : ""}`}
                             >
                               {isNcm ? <b>{cell}</b> : cell}
                             </td>
@@ -829,16 +786,10 @@ const PautaCatPage: React.FC = () => {
                             >
                               <option value="—">—</option>
                               {ANALISTAS.map((n) => (
-                                <option key={n} value={n}>
-                                  {n}
-                                </option>
+                                <option key={n} value={n}>{n}</option>
                               ))}
                             </select>
-                            {atual ? (
-                              <span className="text-xs px-2 py-1 rounded bg-blue-50 text-blue-700">
-                                {atual}
-                              </span>
-                            ) : null}
+                            {atual ? <span className="text-xs px-2 py-1 rounded bg-blue-50 text-blue-700">{atual}</span> : null}
                           </div>
                         </td>
                       </tr>
@@ -846,9 +797,7 @@ const PautaCatPage: React.FC = () => {
                   })}
                   {sec.rows.length === 0 && (
                     <tr>
-                      <td colSpan={headers.length} className="px-4 py-6 text-gray-500">
-                        Sem pleitos nesta seção após os filtros.
-                      </td>
+                      <td colSpan={headers.length} className="px-4 py-6 text-gray-500">Sem pleitos nesta seção após os filtros.</td>
                     </tr>
                   )}
                 </tbody>
