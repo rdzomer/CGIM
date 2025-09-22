@@ -28,8 +28,7 @@ type PleitoRow = Record<string, any>;
 
 type PleitoBase = {
   id: string;
-  pautaId: string;    // id da pauta (doc carregado)
-  baseId: string;     // id da pauta base para esta linha
+  pautaId: string;    // id da pauta exibida (doc carregado)
   pleitoKey: string;
   ncm?: string;
   produto?: string;
@@ -57,13 +56,16 @@ type Atrib = {
 const norm = (s?: string) => (s || "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 const normKey = (s?: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const onlyDigits = (s?: string) => (s || "").replace(/\D+/g, "");
+
 const toMillis = (t: any): number => {
   if (!t) return 0;
   if (typeof t === "number") return t;
   if (t instanceof Date) return t.getTime();
   if (typeof t?.toMillis === "function") return t.toMillis();
+  if (t?.seconds) return t.seconds * 1000 + (t.nanoseconds || 0) / 1e6;
   return 0;
 };
+
 const normalizeStatus = (s?: string) => {
   const v = (s || "").toLowerCase();
   if (/conclu[ií]d/.test(v)) return "concluido";
@@ -116,27 +118,6 @@ function tryMakeKeyFromRow(row: PleitoRow): string {
   return `${n8}|${normKey(produto)}|${normKey(pleiteante)}`;
 }
 
-/** Busca removedos por **baseId** (não por id da retificadora) */
-async function getRemovedByBaseIds(db: any, baseIds: string[]): Promise<Record<string, Set<string>>> {
-  const out: Record<string, Set<string>> = {};
-  const uniq = Array.from(new Set(baseIds.filter(Boolean)));
-  for (const baseId of uniq) {
-    try {
-      const snap = await getDocs(query(collection(db, "pautas"), where("diffResumo.baseId", "==", baseId)));
-      const set = (out[baseId] = out[baseId] || new Set<string>());
-      snap.forEach((d) => {
-        const p = d.data() as any;
-        const arr: any[] = Array.isArray((p as any)?.removidos) ? (p as any).removidos : [];
-        for (const r of arr) {
-          const key = String((r as any)?.pleitoKey || tryMakeKeyFromRow(r));
-          if (key) set.add(key);
-        }
-      });
-    } catch {}
-  }
-  return out;
-}
-
 const ANALISTAS_FIXOS = ["Todos","Pedro Reckziegel","Ricardo Zomer","Antonio Azambuja"] as const;
 const STATUS_OPCOES = ["Todos", "Novo", "Em Análise", "Concluído"] as const;
 
@@ -160,6 +141,46 @@ function rowStyleByStatus(statusRaw?: string) {
   if (n === "concluido") return "bg-green-50 border-l-4 border-l-green-400";
   if (n === "em_analise") return "bg-blue-50 border-l-4 border-l-blue-300";
   return "bg-white border-l-4 border-l-gray-200";
+}
+
+/* ========== Melhor análise anterior (batelada por 'in' em chunks de 10) ========== */
+async function findBestPriorAnalysisBatch(
+  db: any,
+  keys: string[],
+  excludePautaId: string
+): Promise<Record<string, string | null>> {
+  const col = collection(db, "atribuicoes");
+  const out: Record<string, string | null> = {};
+  const uniq = Array.from(new Set(keys.filter(Boolean)));
+  const CHUNK = 10;
+  for (let i = 0; i < uniq.length; i += CHUNK) {
+    const slice = uniq.slice(i, i + CHUNK);
+    const snap = await getDocs(query(col, where("pleitoKey", "in", slice)));
+    const group: Record<string, Atrib[]> = {};
+    snap.forEach((d) => {
+      const a = { id: d.id, ...(d.data() as any) } as Atrib;
+      if (a.pautaId === excludePautaId) return;
+      const k = (a.pleitoKey || "").trim();
+      if (!k) return;
+      (group[k] = group[k] || []).push(a);
+    });
+    Object.entries(group).forEach(([k, arr]) => {
+      arr.sort((a, b) => {
+        const rank = (x: Atrib) => {
+          const st = normalizeStatus(x.status);
+          if (st === "concluido") return 2;
+          if (x?.analise?.resumo || x?.analise?.comercio || x?.analise?.tecnica || x?.analise?.sugestao) return 1;
+          return 0;
+        };
+        const r = rank(b) - rank(a);
+        if (r !== 0) return r;
+        return toMillis(b.updatedAt) - toMillis(a.updatedAt);
+      });
+      out[k] = arr[0]?.id || null;
+    });
+  }
+  uniq.forEach((k) => { if (!(k in out)) out[k] = null; });
+  return out;
 }
 
 /* ==================== Auth ==================== */
@@ -189,9 +210,13 @@ const DashboardPage: React.FC = () => {
   const [statusFiltro, setStatusFiltro] = useState<typeof STATUS_OPCOES[number]>("Todos");
   const [somenteConcluidos, setSomenteConcluidos] = useState(false);
 
+  const [pautaAtualId, setPautaAtualId] = useState<string>("");
+  const [pautaAtualTitulo, setPautaAtualTitulo] = useState<string>("");
+
   const [pleitos, setPleitos] = useState<PleitoBase[]>([]);
   const [atribs, setAtribs] = useState<Atrib[]>([]);
   const [historicoCount, setHistoricoCount] = useState<number>(0);
+  const [priorMap, setPriorMap] = useState<Record<string, string | null>>({}); // pleitoKey -> atribId anterior
 
   useEffect(() => {
     if (authLoading) return;
@@ -205,79 +230,64 @@ const DashboardPage: React.FC = () => {
         const hasNcm = ncmSet.size > 0;
         setAvisoNcm(hasNcm ? "" : "Aviso: NCMs CGIM não configuradas. Exibindo pleitos detectados sem filtrar por NCM.");
 
-        // 2) Carrega pautas e descobre a **última versão por baseId**
+        // 2) Carrega TODAS as pautas e escolhe **apenas a mais recente**
         const snapP = await getDocs(collection(db, "pautas"));
         const pautasAll = snapP.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-        pautasAll.sort((a, b) => toMillis(b.createdAt || b.criadoEm) - toMillis(a.createdAt || a.criadoEm));
-
-        // group by baseId (baseId do diffResumo, ou o próprio id se não for retificadora)
-        const byBase = new Map<string, any[]>();
-        for (const p of pautasAll) {
-          const baseId = (p?.diffResumo?.baseId as string) || p.id;
-          const list = byBase.get(baseId) || [];
-          list.push(p);
-          byBase.set(baseId, list);
+        // ordena por meetingDate -> updatedAt -> createdAt -> criadoEm
+        pautasAll.sort((a, b) => {
+          const ta = toMillis(a.meetingDate) || toMillis(a.updatedAt) || toMillis(a.createdAt || a.criadoEm);
+          const tb = toMillis(b.meetingDate) || toMillis(b.updatedAt) || toMillis(b.createdAt || b.criadoEm);
+          return tb - ta;
+        });
+        const pauta = pautasAll[0] || null;
+        if (!pauta) {
+          setPleitos([]);
+          setAtribs([]);
+          setHistoricoCount(0);
+          setPriorMap({});
+          setPautaAtualId("");
+          setPautaAtualTitulo("");
+          setCarregando(false);
+          return;
         }
 
-        // pega a última versão de cada baseId
-        const latestByBase: any[] = [];
-        const baseIds: string[] = [];
-        byBase.forEach((arr, baseId) => {
-          arr.sort((a: any, b: any) => toMillis(b.createdAt || b.criadoEm) - toMillis(a.createdAt || a.criadoEm));
-          latestByBase.push(arr[0]);
-          baseIds.push(baseId);
-        });
+        setPautaAtualId(pauta.id);
+        setPautaAtualTitulo(
+          String(pauta.title || pauta.meeting || pauta.reuniao || pauta.slug || pauta.id)
+        );
 
-        // 3) chaves removidas por retificadoras (por baseId)
-        const removedByBase = await getRemovedByBaseIds(db, baseIds);
+        // 3) Monta lista de pleitos SOMENTE da pauta mais recente
+        const all: PleitoBase[] = [];
+        const secoes: any[] = Array.isArray(pauta?.sections)
+          ? pauta.sections
+          : (Array.isArray(pauta?.secoes) ? pauta.secoes : []);
 
-        // 4) Monta lista de pleitos SOMENTE da última versão de cada baseId
-        const allPleitos: PleitoBase[] = [];
-        for (const p of latestByBase) {
-          const pautaId = p.id;
-          const baseId = (p?.diffResumo?.baseId as string) || p.id;
-          const sections: any[] = Array.isArray(p?.sections) ? p.sections : (Array.isArray(p?.secoes) ? p.secoes : []);
-          sections.forEach((sec: any, si: number) => {
-            const rows: PleitoRow[] = Array.isArray(sec?.rows) ? sec.rows : [];
-            rows.forEach((r: any, ri: number) => {
-              const { ncm, produto, pleiteante, tipo } = projectLinha(r);
-              const flags = r?.cgim === true || r?.isCGIM === true || r?.pertenceCGIM === true || r?.inCGIMScope === true;
-              const n8 = onlyDigits(ncm).slice(0, 8);
-              const aceita = flags || (!hasNcm ? true : (n8.length === 8 && ncmSet.has(n8)));
-              if (!aceita) return;
+        secoes.forEach((sec: any) => {
+          const rows: PleitoRow[] = Array.isArray(sec?.rows) ? sec.rows : [];
+          rows.forEach((r: any) => {
+            const { ncm, produto, pleiteante, tipo } = projectLinha(r);
+            const flags = r?.cgim === true || r?.isCGIM === true || r?.pertenceCGIM === true || r?.inCGIMScope === true;
+            const n8 = onlyDigits(ncm).slice(0, 8);
+            const aceita = flags || (!hasNcm ? true : (n8.length === 8 && ncmSet.has(n8)));
+            if (!aceita) return;
 
-              // chave do pleito
-              const keyRaw = r?.key || r?.id || tryMakeKeyFromRow(r);
-              const key = String(keyRaw || `${pautaId}:${si}:${ri}`);
+            const keyRaw = r?.key || r?.id || tryMakeKeyFromRow(r);
+            const key = String(keyRaw || "");
 
-              // se esta *base* tem retificadoras que removeram este pleito, não incluir
-              if (removedByBase[baseId]?.has(key)) return;
-
-              allPleitos.push({
-                id: key,
-                pautaId,
-                baseId,
-                pleitoKey: key,
-                ncm: n8,
-                produto,
-                pleiteante,
-                tipoPleito: tipo,
-                tituloSecao: sec?.title || sec?.titulo || ""
-              });
+            all.push({
+              id: key,
+              pautaId: pauta.id,
+              pleitoKey: key,
+              ncm: n8,
+              produto,
+              pleiteante,
+              tipoPleito: tipo,
+              tituloSecao: sec?.title || sec?.titulo || ""
             });
           });
-        }
-
-        // 4.1) dedupe entre bases por pleitoKey (não deve ocorrer, mas garantimos)
-        const uniq = new Map<string, PleitoBase>();
-        for (const p of allPleitos) if (!uniq.has(p.pleitoKey)) uniq.set(p.pleitoKey, p);
-        const pleitosFinal = Array.from(uniq.values()).sort((a, b) => {
-          const an = onlyDigits(a.ncm); const bn = onlyDigits(b.ncm);
-          if (an !== bn) return an.localeCompare(bn);
-          return (a.produto || "").localeCompare(b.produto || "");
         });
 
-        // 5) Atribuições (com filtro de analista, sem perder nada)
+        // 4) Atribuições (com filtro de analista, sem perder nada)
         let atribsAll: Atrib[] = [];
         if (analistaFiltro === "Todos") {
           const s = await getDocs(collection(db, "atribuicoes"));
@@ -297,11 +307,11 @@ const DashboardPage: React.FC = () => {
         }
         atribsAll.sort((a, b) => toMillis(b.updatedAt) - toMillis(a.updatedAt));
 
-        setPleitos(pleitosFinal);
+        setPleitos(all);
         setAtribs(atribsAll);
 
-        // 6) Histórico dinâmico: análises concluídas cuja `pleitoKey` **não** está na pauta ativa
-        const currentKeys = new Set(pleitosFinal.map((p) => p.pleitoKey));
+        // 5) Histórico dinâmico: análises concluídas cuja `pleitoKey` **não** está na pauta atual
+        const currentKeys = new Set(all.map((p) => p.pleitoKey));
         let historico = 0;
         for (const a of atribsAll) {
           const k = String(a.pleitoKey || "").trim();
@@ -311,6 +321,11 @@ const DashboardPage: React.FC = () => {
           if (concl && temAnalise && !currentKeys.has(k)) historico++;
         }
         setHistoricoCount(historico);
+
+        // 6) Para cada pleito ATUAL, descobre melhor análise anterior (exclui a própria pauta)
+        const keys = all.map((p) => p.pleitoKey);
+        const prior = await findBestPriorAnalysisBatch(db, keys, pauta.id);
+        setPriorMap(prior);
 
       } catch (e: any) {
         console.error(e);
@@ -364,12 +379,33 @@ const DashboardPage: React.FC = () => {
   );
   const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"];
 
+  const openAnalyse = (pleitoKey: string, atr?: Atrib | null) => {
+    const atrId = atr?.id || makeAtribuicaoId(pleitoKey);
+    nav(`/analise/${encodeURIComponent(atrId)}`);
+  };
+
+  const openAnalyseReuse = (pleitoKey: string, atr?: Atrib | null) => {
+    const priorId = priorMap[pleitoKey] || "";
+    const atrId = atr?.id || makeAtribuicaoId(pleitoKey);
+    const url = priorId
+      ? `/analise/${encodeURIComponent(atrId)}?copyFrom=${encodeURIComponent(priorId)}`
+      : `/analise/${encodeURIComponent(atrId)}`;
+    nav(url);
+  };
+
   /* ==================== Render ==================== */
   return (
     <div className="p-6">
       <div className="w-full space-y-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h1 className="text-2xl font-semibold">Pleitos CGIM</h1>
+          <div>
+            <h1 className="text-2xl font-semibold">Pleitos CGIM</h1>
+            {pautaAtualTitulo && (
+              <div className="text-sm text-slate-600">
+                Exibindo a pauta mais recente: {pautaAtualTitulo}
+              </div>
+            )}
+          </div>
 
           <div className="flex flex-col sm:flex-row sm:items-center gap-2">
             {/* Filtro Analista */}
@@ -477,8 +513,9 @@ const DashboardPage: React.FC = () => {
               {!carregando && itens.length === 0 && <tr><td className="p-3" colSpan={7}>Nenhum pleito encontrado.</td></tr>}
               {!carregando && itens.map((it) => {
                 const showSug = !!it.sugestao;
-                const atrId = it._atr?.id || makeAtribuicaoId(it.pleitoKey);
                 const rowCls = rowStyleByStatus(it.status);
+                const priorId = priorMap[it.pleitoKey] || null;
+
                 return (
                   <tr key={it.pleitoKey} className={`border-t align-top ${rowCls}`}>
                     <td className="p-3">{it.ncm ? `${it.ncm.slice(0,4)}.${it.ncm.slice(4,6)}.${it.ncm.slice(6,8)}` : "—"}</td>
@@ -498,12 +535,24 @@ const DashboardPage: React.FC = () => {
                       ) : <span className="text-gray-400">—</span>}
                     </td>
                     <td className="p-3">
-                      <button
-                        className="px-3 py-1 rounded border text-sm hover:bg-gray-50"
-                        onClick={() => nav(`/analise/${encodeURIComponent(atrId)}`)}
-                      >
-                        Abrir análise
-                      </button>
+                      <div className="flex flex-col gap-2">
+                        <button
+                          className="px-3 py-1 rounded border text-sm hover:bg-gray-50"
+                          onClick={() => openAnalyse(it.pleitoKey, it._atr)}
+                        >
+                          Abrir análise
+                        </button>
+
+                        {priorId && (
+                          <button
+                            className="px-3 py-1 rounded border text-sm hover:bg-gray-50"
+                            onClick={() => openAnalyseReuse(it.pleitoKey, it._atr)}
+                            title="Há análise anterior para este pleito — clique para reaproveitar"
+                          >
+                            Reaproveitar análise
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
