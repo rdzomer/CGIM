@@ -28,7 +28,7 @@ type PleitoRow = Record<string, any>;
 
 type PleitoBase = {
   id: string;
-  pautaId: string;    // id da pauta exibida (doc carregado)
+  pautaId: string;
   pleitoKey: string;
   ncm?: string;
   produto?: string;
@@ -79,7 +79,6 @@ const displayStatus = (raw?: string) => {
   return "Novo";
 };
 
-// headers flexíveis
 function pickKey(row: PleitoRow, candidates: string[]): string | undefined {
   const keys = Object.keys(row || {});
   for (const cand of candidates) {
@@ -97,7 +96,7 @@ function pickKey(row: PleitoRow, candidates: string[]): string | undefined {
 function projectLinha(row: PleitoRow) {
   const kNcm  = pickKey(row, ["NCM","Código NCM","Codigo NCM","Código","Codigo","NCM 8"]);
   const kProd = pickKey(row, ["Produto","Descrição do Produto","Descricao do Produto","Produto/Descrição","Descrição","Descricao"]);
-  const kPlt  = pickKey(row, ["Pleiteante","Empresa","Requerente","Solicitante"]);
+  const kPlt  = pickKey(row, ["Pleiteante","Empresa","Requerente","Solicitante","Interessado"]);
   const kTipo = pickKey(row, ["Tipo de Pleito","Tipo","Pleito","Pedido"]);
   return {
     ncm: kNcm ? String(row[kNcm] ?? "") : "",
@@ -122,8 +121,8 @@ const ANALISTAS_FIXOS = ["Todos","Pedro Reckziegel","Ricardo Zomer","Antonio Aza
 const STATUS_OPCOES = ["Todos", "Novo", "Em Análise", "Concluído"] as const;
 
 function nomeMatchesFiltro(nome: string | undefined | null, filtro: typeof ANALISTAS_FIXOS[number]) {
-  if (!nome) return false;
   if (filtro === "Todos") return true;
+  if (!nome) return false;
   const a = normKey(nome); const b = normKey(filtro);
   return a === b || a.replace("antonio","antônio") === b || a.replace("antônio","antonio") === b;
 }
@@ -215,7 +214,6 @@ const DashboardPage: React.FC = () => {
 
   const [pleitos, setPleitos] = useState<PleitoBase[]>([]);
   const [atribs, setAtribs] = useState<Atrib[]>([]);
-  const [historicoCount, setHistoricoCount] = useState<number>(0);
   const [priorMap, setPriorMap] = useState<Record<string, string | null>>({}); // pleitoKey -> atribId anterior
 
   useEffect(() => {
@@ -230,10 +228,9 @@ const DashboardPage: React.FC = () => {
         const hasNcm = ncmSet.size > 0;
         setAvisoNcm(hasNcm ? "" : "Aviso: NCMs CGIM não configuradas. Exibindo pleitos detectados sem filtrar por NCM.");
 
-        // 2) Carrega TODAS as pautas e escolhe **apenas a mais recente**
+        // 2) Carrega todas as pautas e pega a mais recente
         const snapP = await getDocs(collection(db, "pautas"));
         const pautasAll = snapP.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-        // ordena por meetingDate -> updatedAt -> createdAt -> criadoEm
         pautasAll.sort((a, b) => {
           const ta = toMillis(a.meetingDate) || toMillis(a.updatedAt) || toMillis(a.createdAt || a.criadoEm);
           const tb = toMillis(b.meetingDate) || toMillis(b.updatedAt) || toMillis(b.createdAt || b.criadoEm);
@@ -241,20 +238,13 @@ const DashboardPage: React.FC = () => {
         });
         const pauta = pautasAll[0] || null;
         if (!pauta) {
-          setPleitos([]);
-          setAtribs([]);
-          setHistoricoCount(0);
-          setPriorMap({});
-          setPautaAtualId("");
-          setPautaAtualTitulo("");
+          setPleitos([]); setAtribs([]); setPriorMap({}); setPautaAtualId(""); setPautaAtualTitulo("");
           setCarregando(false);
           return;
         }
 
         setPautaAtualId(pauta.id);
-        setPautaAtualTitulo(
-          String(pauta.title || pauta.meeting || pauta.reuniao || pauta.slug || pauta.id)
-        );
+        setPautaAtualTitulo(String(pauta.title || pauta.meeting || pauta.reuniao || pauta.slug || pauta.id));
 
         // 3) Monta lista de pleitos SOMENTE da pauta mais recente
         const all: PleitoBase[] = [];
@@ -266,10 +256,10 @@ const DashboardPage: React.FC = () => {
           const rows: PleitoRow[] = Array.isArray(sec?.rows) ? sec.rows : [];
           rows.forEach((r: any) => {
             const { ncm, produto, pleiteante, tipo } = projectLinha(r);
-            const flags = r?.cgim === true || r?.isCGIM === true || r?.pertenceCGIM === true || r?.inCGIMScope === true;
             const n8 = onlyDigits(ncm).slice(0, 8);
-            const aceita = flags || (!hasNcm ? true : (n8.length === 8 && ncmSet.has(n8)));
-            if (!aceita) return;
+            // aceita sem set de NCM? então exibe tudo
+            if (hasNcm && n8.length !== 8) return;
+            if (hasNcm && !ncmSet.has(n8)) return;
 
             const keyRaw = r?.key || r?.id || tryMakeKeyFromRow(r);
             const key = String(keyRaw || "");
@@ -310,19 +300,7 @@ const DashboardPage: React.FC = () => {
         setPleitos(all);
         setAtribs(atribsAll);
 
-        // 5) Histórico dinâmico: análises concluídas cuja `pleitoKey` **não** está na pauta atual
-        const currentKeys = new Set(all.map((p) => p.pleitoKey));
-        let historico = 0;
-        for (const a of atribsAll) {
-          const k = String(a.pleitoKey || "").trim();
-          if (!k) continue;
-          const concl = normalizeStatus(a.status) === "concluido";
-          const temAnalise = !!(a?.analise?.tecnica || a?.analise?.sugestao || a?.analise?.resumo || a?.analise?.comercio);
-          if (concl && temAnalise && !currentKeys.has(k)) historico++;
-        }
-        setHistoricoCount(historico);
-
-        // 6) Para cada pleito ATUAL, descobre melhor análise anterior (exclui a própria pauta)
+        // 5) Para cada pleito da pauta ATUAL, descobre a melhor análise anterior (exclui a própria pauta)
         const keys = all.map((p) => p.pleitoKey);
         const prior = await findBestPriorAnalysisBatch(db, keys, pauta.id);
         setPriorMap(prior);
@@ -354,7 +332,6 @@ const DashboardPage: React.FC = () => {
       return { ...p, analista, sugestao, status, _atr: at };
     });
 
-    // filtros existentes
     base = base.filter((it) => (analistaFiltro === "Todos" ? true : nomeMatchesFiltro(it.analista, analistaFiltro)));
     base = base.filter((it) => statusMatchesFiltro(it.status, statusFiltro));
     if (somenteConcluidos) base = base.filter((it) => normalizeStatus(it.status) === "concluido");
@@ -379,19 +356,32 @@ const DashboardPage: React.FC = () => {
   );
   const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"];
 
+  /* ==================== Navegação ==================== */
+  const buildAtrIdForCurrentPauta = (pleitoKey: string) => {
+    // escopo por pauta para garantir análise em branco da pauta atual
+    return makeAtribuicaoId(`${pautaAtualId}__${pleitoKey}`);
+  };
+
   const openAnalyse = (pleitoKey: string, atr?: Atrib | null) => {
-    const atrId = atr?.id || makeAtribuicaoId(pleitoKey);
+    // SEM copyFrom — sempre “em branco” para a pauta atual
+    const atrId = atr?.id || buildAtrIdForCurrentPauta(pleitoKey);
     nav(`/analise/${encodeURIComponent(atrId)}`);
   };
 
   const openAnalyseReuse = (pleitoKey: string, atr?: Atrib | null) => {
+    // COM copyFrom — reaproveita a melhor análise anterior
     const priorId = priorMap[pleitoKey] || "";
-    const atrId = atr?.id || makeAtribuicaoId(pleitoKey);
+    const atrId = atr?.id || buildAtrIdForCurrentPauta(pleitoKey);
     const url = priorId
       ? `/analise/${encodeURIComponent(atrId)}?copyFrom=${encodeURIComponent(priorId)}`
       : `/analise/${encodeURIComponent(atrId)}`;
     nav(url);
   };
+
+  const reaproveitaveisCount = useMemo(
+    () => Object.values(priorMap).filter(Boolean).length,
+    [priorMap]
+  );
 
   /* ==================== Render ==================== */
   return (
@@ -466,16 +456,16 @@ const DashboardPage: React.FC = () => {
             <div className="text-sm text-gray-500">Concluído</div>
             <div className="text-3xl font-semibold">{resumo.concluido}</div>
           </div>
-          {/* Histórico dinâmico */}
+          {/* Com análise anterior (nesta pauta) */}
           <div className="p-4 border rounded-xl bg-white/70">
-            <div className="text-sm text-gray-500">Histórico (pleitoKey)</div>
-            <div className="text-3xl font-semibold">{historicoCount}</div>
+            <div className="text-sm text-gray-500">Com análise anterior</div>
+            <div className="text-3xl font-semibold">{reaproveitaveisCount}</div>
             <button
               className="mt-3 px-3 py-1.5 rounded border text-sm hover:bg-gray-50"
               onClick={() => nav("/minhas-tarefas")}
-              title="Abrir Minhas Tarefas para reaproveitar histórico"
+              title="Abrir Minhas Tarefas"
             >
-              Reaproveitar análises
+              Ver Minhas Tarefas
             </button>
           </div>
         </div>
@@ -539,6 +529,7 @@ const DashboardPage: React.FC = () => {
                         <button
                           className="px-3 py-1 rounded border text-sm hover:bg-gray-50"
                           onClick={() => openAnalyse(it.pleitoKey, it._atr)}
+                          title="Abrir análise em branco da pauta atual"
                         >
                           Abrir análise
                         </button>
@@ -547,7 +538,7 @@ const DashboardPage: React.FC = () => {
                           <button
                             className="px-3 py-1 rounded border text-sm hover:bg-gray-50"
                             onClick={() => openAnalyseReuse(it.pleitoKey, it._atr)}
-                            title="Há análise anterior para este pleito — clique para reaproveitar"
+                            title="Há análise anterior — clique para reaproveitar"
                           >
                             Reaproveitar análise
                           </button>
