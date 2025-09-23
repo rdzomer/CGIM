@@ -63,6 +63,9 @@ type Atribuicao = {
   } | null;
 
   updatedAt?: any;
+
+  __extraReaproveitar?: boolean;
+  __retirado?: boolean;
 };
 
 type AnyRow = Record<string, any>;
@@ -181,17 +184,42 @@ function flattenPleitosFromPauta(pauta: PautaDoc) {
     : [];
   for (const sec of secoes) {
     const secTitle = renderStr(sec?.title ?? sec?.titulo ?? "", "");
-    if (Array.isArray(sec?.rows)) sec.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
-    if (Array.isArray(sec?.tabelas))
-      sec.tabelas.forEach((tb: any) => Array.isArray(tb?.rows) && tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle })));
-    if (Array.isArray(sec?.tables))
-      sec.tables.forEach((tb: any) => Array.isArray(tb?.rows) && tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle })));
-    if (Array.isArray(sec?.pleitos)) sec.pleitos.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+
+    if (Array.isArray(sec?.rows)) {
+      sec.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+    }
+
+    if (Array.isArray(sec?.tabelas)) {
+      sec.tabelas.forEach((tb: any) => {
+        if (Array.isArray(tb?.rows)) {
+          tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+        }
+      });
+    }
+
+    if (Array.isArray(sec?.tables)) {
+      sec.tables.forEach((tb: any) => {
+        if (Array.isArray(tb?.rows)) {
+          tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+        }
+      });
+    }
+
+    if (Array.isArray(sec?.pleitos)) {
+      sec.pleitos.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+    }
   }
-  if (Array.isArray((pauta as any)?.tabelas))
-    (pauta as any).tabelas.forEach((tb: any) => Array.isArray(tb?.rows) && tb.rows.forEach((r: any) => out.push({ ...r, __sec: "" })));
-  if (Array.isArray((pauta as any)?.pleitos))
+
+  if (Array.isArray((pauta as any)?.tabelas)) {
+    (pauta as any).tabelas.forEach((tb: any) => {
+      if (Array.isArray(tb?.rows)) {
+        tb.rows.forEach((r: any) => out.push({ ...r, __sec: "" }));
+      }
+    });
+  }
+  if (Array.isArray((pauta as any)?.pleitos)) {
     (pauta as any).pleitos.forEach((r: any) => out.push({ ...r, __sec: "" }));
+  }
   return out;
 }
 
@@ -263,20 +291,15 @@ async function fetchRecentPautasRobusto(db: any, max = 24): Promise<PautaDoc[]> 
   }
 }
 
-/** Calcula vN (número da versão) para retificadoras:
- * - usa revIndex quando existir (vN = revIndex + 1)
- * - senão, consulta TODAS as retificações daquela base, ordena por createdAt/updatedAt asc e infere vN (primeira ⇒ v2)
- */
+/** Calcula vN (número da versão) para retificadoras */
 async function computeVersionNumbers(
   db: any,
   list: PautaDoc[]
 ): Promise<Map<string, number>> {
   const out = new Map<string, number>();
-  // 1) já preenche usando revIndex
   for (const p of list) {
     if (typeof p.revIndex === "number") out.set(p.id, p.revIndex + 1);
   }
-  // 2) para as que têm baseId e NÃO têm revIndex, buscamos do Firestore
   const baseIds = Array.from(
     new Set(
       list
@@ -289,15 +312,12 @@ async function computeVersionNumbers(
     try {
       const snap = await getDocs(query(collection(db, "pautas"), where("diffResumo.baseId", "==", baseId)));
       const arr = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as PautaDoc[];
-      // Ordena pela data de criação (fallback updatedAt)
       arr.sort((a, b) => (toMillis(a.createdAt) || toMillis(a.updatedAt)) - (toMillis(b.createdAt) || toMillis(b.updatedAt)));
       arr.forEach((p, i) => {
         const vN = typeof p.revIndex === "number" ? p.revIndex + 1 : i + 2;
         out.set(p.id, vN);
       });
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   }
   return out;
 }
@@ -425,7 +445,6 @@ async function findBestPriorAnalysisId(
 /* ==================== Componente ==================== */
 const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"]; // Novo, Em análise, Concluído
 
-// Monta rótulo amigável: adiciona (RETIFICADA vN) quando aplicável
 function makePautaLabel(p: PautaDoc, versionMap?: Map<string, number>): string {
   const baseTitle =
     renderStr(p.title, "") ||
@@ -461,15 +480,13 @@ const MinhasTarefasPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [tarefas, setTarefas] = useState<Atribuicao[]>([]);
   const [copyLoading, setCopyLoading] = useState<Record<string, boolean>>({});
-  const [priorMap, setPriorMap] = useState<Record<string, string | null>>({}); // atrId -> priorId (ou null)
+  const [priorMap, setPriorMap] = useState<Record<string, string | null>>({});
 
-  // ====== PAUTAS (seletor) ======
   const [pautas, setPautas] = useState<PautaDoc[]>([]);
   const [pautaId, setPautaId] = useState<string>("");
   const [isLoadingPautas, setIsLoadingPautas] = useState<boolean>(true);
-  const [versionMap, setVersionMap] = useState<Map<string, number>>(new Map()); // pautaId -> vN
+  const [versionMap, setVersionMap] = useState<Map<string, number>>(new Map());
 
-  // Carrega pautas (robusto) e calcula vN
   useEffect(() => {
     if (authLoading) return;
     (async () => {
@@ -477,7 +494,6 @@ const MinhasTarefasPage: React.FC = () => {
       try {
         let list = await fetchRecentPautasRobusto(db, 24);
 
-        // Derivar via atribuições se vazio
         if ((!list || list.length === 0) && user) {
           const mine = await fetchAtribuicoesDoUsuario(db, user);
           const ids = Array.from(new Set(mine.map((m) => m.pautaId).filter(Boolean))) as string[];
@@ -491,7 +507,6 @@ const MinhasTarefasPage: React.FC = () => {
         setPautas(list || []);
         if (!pautaId && list && list.length) setPautaId(list[0].id);
 
-        // calcula versões (vN) para exibição
         const vmap = await computeVersionNumbers(db, list || []);
         setVersionMap(vmap);
       } catch {
@@ -503,7 +518,6 @@ const MinhasTarefasPage: React.FC = () => {
     })();
   }, [db, authLoading, user]);
 
-  // carrega atribuições do usuário e aplica filtro por pauta
   useEffect(() => {
     if (authLoading || !pautaId) return;
     (async () => {
@@ -515,13 +529,10 @@ const MinhasTarefasPage: React.FC = () => {
           return;
         }
 
-        // 1) atribuições do usuário
         const mine = await fetchAtribuicoesDoUsuario(db, user);
 
-        // 2) Filtrar por pauta selecionada
         const mineScoped = mine.filter((a) => (a.pautaId || "") === pautaId);
 
-        // 3) DEDUPE por pauta (já é single pauta)
         const byScopedKey = new Map<string, Atribuicao>();
         for (const a of mineScoped) {
           const ncm8 = onlyDigits(a.ncm).slice(0, 8);
@@ -544,51 +555,76 @@ const MinhasTarefasPage: React.FC = () => {
         }
         const merged = Array.from(byScopedKey.values());
 
-        // 4) completar dados a partir da pauta (com cache)
+        // completar dados + sugerir “reaproveitar” para pleitos da pauta atual com análise anterior do usuário
+        let pauta: PautaDoc | undefined;
         const need = merged.filter((l) => !(l.ncm && l.produto && l.tipoPleito && l.tituloSecao));
-        if (need.length) {
-          const pautasMap = await getPautasByIdsCached(db, [pautaId]);
-          const pauta = pautasMap[pautaId];
-          if (pauta) {
-            const rows = flattenPleitosFromPauta(pauta);
-            for (const t of need) {
-              // match por key explícita
-              let found: AnyRow | undefined = rows.find((r) => {
-                const k = String((r as any)?.key || (r as any)?.id || "");
-                return t.pleitoKey && k && normKey(k) === normKey(t.pleitoKey);
+
+        const pautasMap = await getPautasByIdsCached(db, [pautaId]);
+        pauta = pautasMap[pautaId];
+        if (pauta) {
+          const rows = flattenPleitosFromPauta(pauta);
+
+          for (const t of need) {
+            let found: AnyRow | undefined = rows.find((r) => {
+              const k = String((r as any)?.key || (r as any)?.id || "");
+              return t.pleitoKey && k && normKey(k) === normKey(t.pleitoKey);
+            });
+
+            if (!found && t.pleitoKey) {
+              found = rows.find((r) => {
+                const k = tryMakeKeyFromRow(r);
+                return k && normKey(k) === normKey(t.pleitoKey!);
               });
-
-              // fallback por key derivada
-              if (!found && t.pleitoKey) {
-                found = rows.find((r) => {
-                  const k = tryMakeKeyFromRow(r);
-                  return k && normKey(k) === normKey(t.pleitoKey!);
-                });
-              }
-
-              // fallback por NCM+Produto
-              if (!found) {
-                const n8 = onlyDigits(t.ncm).slice(0, 8);
-                const prodNk = normKey(t.produto || "");
-                found = rows.find((r) => {
-                  const pr = projectLinha(r);
-                  return onlyDigits(pr.ncm).slice(0, 8) === n8 && normKey(pr.produto) === prodNk;
-                });
-              }
-
-              if (found) {
-                const pr = projectLinha(found);
-                t.ncm = t.ncm || pr.ncm;
-                t.produto = t.produto || pr.produto;
-                t.pleiteante = t.pleiteante || pr.pleiteante;
-                t.tipoPleito = t.tipoPleito || pr.tipoPleito;
-                t.tituloSecao = t.tituloSecao || String((found as any)?.__sec || "");
-              }
             }
+
+            if (!found) {
+              const n8 = onlyDigits(t.ncm).slice(0, 8);
+              const prodNk = normKey(t.produto || "");
+              found = rows.find((r) => {
+                const pr = projectLinha(r);
+                return onlyDigits(pr.ncm).slice(0, 8) === n8 && normKey(pr.produto) === prodNk;
+              });
+            }
+
+            if (found) {
+              const pr = projectLinha(found);
+              t.ncm = t.ncm || pr.ncm;
+              t.produto = t.produto || pr.produto;
+              t.pleiteante = t.pleiteante || pr.pleiteante;
+              t.tipoPleito = t.tipoPleito || pr.tipoPleito;
+              t.tituloSecao = t.tituloSecao || String((found as any)?.__sec || "");
+            }
+          }
+
+          const assignedKeys = new Set(merged.map((a) => String(a.pleitoKey || "")).filter(Boolean));
+          const myHistoricKeys = new Set(
+            mine.filter((a) => a.pleitoKey && a.pautaId !== pautaId).map((a) => String(a.pleitoKey))
+          );
+
+          for (const r of rows) {
+            const k = String((r as any)?.key || (r as any)?.id || tryMakeKeyFromRow(r));
+            if (!k) continue;
+            if (assignedKeys.has(k)) continue;
+            if (!myHistoricKeys.has(k)) continue;
+
+            const pr = projectLinha(r);
+            const extra: Atribuicao = {
+              id: makeAtribuicaoId(`${pautaId}__${k}`),
+              pautaId,
+              pleitoKey: k,
+              ncm: pr.ncm,
+              produto: pr.produto,
+              pleiteante: pr.pleiteante,
+              tipoPleito: pr.tipoPleito,
+              tituloSecao: String((r as any)?.__sec || ""),
+              status: "Não iniciado",
+              analise: null,
+              __extraReaproveitar: true,
+            };
+            merged.push(extra);
           }
         }
 
-        // 4.1) marcar RETIRADOS (retificação) somente para a pauta corrente
         try {
           const removedByBase = await getRemovedKeysByBaseIds(db, [pautaId]);
           const keyFor = (t: Atribuicao) => {
@@ -604,12 +640,11 @@ const MinhasTarefasPage: React.FC = () => {
             const baseId = pautaId;
             const k = keyFor(t);
             if (baseId && k && removedByBase[baseId]?.has(k)) {
-              (t as any).__retirado = true;
+              t.__retirado = true;
             }
           }
         } catch {}
 
-        // 5) ordenar: em_analise > nao_iniciado > concluido; depois por atualização
         merged.sort((a, b) => {
           const rank = (s?: string) => {
             const n = normalizeStatus(s);
@@ -624,7 +659,6 @@ const MinhasTarefasPage: React.FC = () => {
 
         setTarefas(merged);
 
-        // 6) PREFETCH: descobrir se há análise anterior por pleitoKey (ignora mesma pauta)
         const entries = await Promise.all(
           merged.map(async (t) => {
             const prior = await findBestPriorAnalysisId(db, t.pleitoKey, pautaId);
@@ -640,7 +674,6 @@ const MinhasTarefasPage: React.FC = () => {
     })();
   }, [authLoading, user, db, pautaId]);
 
-  // ====== gráfico de status (com base no filtro atual) ======
   const resumo = useMemo(() => {
     const c = { em_analise: 0, nao_iniciado: 0, concluido: 0 };
     for (const t of tarefas) c[normalizeStatus(t.status) as keyof typeof c]++;
@@ -657,20 +690,21 @@ const MinhasTarefasPage: React.FC = () => {
   );
 
   const openAnalyse = (t: Atribuicao) => {
-    const atrId = t.id || makeAtribuicaoId(t.pleitoKey || "");
+    const atrId =
+      t.id || makeAtribuicaoId(`${t.pautaId || pautaId}__${t.pleitoKey || ""}`);
     const url = `/analise/${encodeURIComponent(atrId)}`;
-    const el = document.activeElement as HTMLElement | null;
-    el?.blur?.();
+    (document.activeElement as HTMLElement | null)?.blur?.();
     nav(url);
   };
 
   function onReaproveitar(t: Atribuicao) {
     const sourceId = priorMap[t.id] || null;
-    if (!sourceId) return;
-    const atrId = t.id || makeAtribuicaoId(t.pleitoKey || "");
-    const url = `/analise/${encodeURIComponent(atrId)}?copyFrom=${encodeURIComponent(sourceId)}`;
-    const el = document.activeElement as HTMLElement | null;
-    el?.blur?.();
+    const atrId =
+      t.id || makeAtribuicaoId(`${t.pautaId || pautaId}__${t.pleitoKey || ""}`);
+    const url = sourceId
+      ? `/analise/${encodeURIComponent(atrId)}?copyFrom=${encodeURIComponent(sourceId)}`
+      : `/analise/${encodeURIComponent(atrId)}`;
+    (document.activeElement as HTMLElement | null)?.blur?.();
     nav(url);
   }
 
@@ -780,7 +814,6 @@ const MinhasTarefasPage: React.FC = () => {
 
       {/* ====== Cards ====== */}
       <div className="w-full">
-        {/* carregando */}
         {loading && (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -789,7 +822,6 @@ const MinhasTarefasPage: React.FC = () => {
           </div>
         )}
 
-        {/* lista */}
         {!loading && (
           <>
             {tarefas.length === 0 ? (
@@ -816,21 +848,19 @@ const MinhasTarefasPage: React.FC = () => {
                       onClick={() => openAnalyse(t)}
                       onKeyDown={handleKeyDown}
                     >
-                      {/* Cabeçalho */}
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-xs text-gray-500">{renderStr(t.tituloSecao)}</div>
                           <div className="mt-0.5 font-semibold truncate">{renderStr(t.produto)}</div>
                         </div>
                         {statusBadge(t.status)}
-                        {(t as any).__retirado ? (
+                        {t.__retirado ? (
                           <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-100 text-rose-800 border border-rose-200">
                             Retirado (retificação)
                           </span>
                         ) : null}
                       </div>
 
-                      {/* Infos principais */}
                       <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
                         <div className="space-y-1">
                           <div className="text-xs text-gray-500">NCM</div>
@@ -846,7 +876,6 @@ const MinhasTarefasPage: React.FC = () => {
                         </div>
                       </div>
 
-                      {/* Ações */}
                       <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
                         <button
                           className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100"
