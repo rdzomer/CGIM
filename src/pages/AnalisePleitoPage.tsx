@@ -1,337 +1,205 @@
 // src/pages/AnalisePleitoPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
-import { doc, getDoc, getFirestore, updateDoc, serverTimestamp } from "firebase/firestore";
+import { doc, getDoc, getFirestore, updateDoc, serverTimestamp, setDoc } from "firebase/firestore";
 import toast from "react-hot-toast";
 import { FileText } from "lucide-react";
-// histórico
 import { getHistoricoByPleitoKey, upsertHistoricoFromAtribuicao } from "../services/historicoAnalisesService";
 
 /* ----------------------------- Tipos ----------------------------- */
-type Analise = {
-  resumo?: string;
-  comercio?: string;
-  tecnica?: string;
-  sugestao?: string;
-};
-
+type Analise = { resumo?: string; comercio?: string; tecnica?: string; sugestao?: string };
 type PosDeliberacao = {
-  data?: string;               // ISO yyyy-mm-dd
+  data?: string;
   resultado?: "aprovado" | "aprovado_com_ajustes" | "indeferido" | "retirado" | "outro";
-  encaminhamento?: string;     // texto livre (encaminhamento/observações)
-  numeroAta?: string;          // n° ATA/SEI/registro
+  encaminhamento?: string;
+  numeroAta?: string;
 };
-
 type Atrib = {
   id: string;
   ncm?: string;
   produto?: string;
   pleiteante?: string;
+  tipoPleito?: string;
   tituloSecao?: string;
   pautaId?: string;
+  pleitoKey?: string;
   status?: string;
   analise?: Analise | null;
-  pleitoKey?: string;
+  linhaPauta?: any;
   posDeliberacao?: PosDeliberacao | null;
 };
 
-/* ---------------------------- Helpers ---------------------------- */
-function fmtNcm(n?: string) {
-  const d = (n || "").replace(/\D+/g, "");
-  if (d.length !== 8) return n || "";
-  return `${d.slice(0, 4)}.${d.slice(4, 6)}.${d.slice(6)}`;
-}
-const HIDDEN_KEYS = /^col_\d+$/i;
-const SHORT_LIMIT = 170;
-const shorten = (s?: string, n = SHORT_LIMIT) => {
-  const t = (s || "").trim();
-  if (!t) return "—";
-  return t.length > n ? t.slice(0, n).trimEnd() + "…" : t;
+/* ----------------------------- Helpers ----------------------------- */
+const onlyDigits = (s?: string) => (s ?? "").replace(/\D+/g, "");
+const norm = (s?: string) => (s ?? "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
+const normKey = (s?: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const fmtNCM = (s?: string) => {
+  const n8 = onlyDigits(s).slice(0, 8);
+  return n8.length === 8 ? `${n8.slice(0, 4)}.${n8.slice(4, 6)}.${n8.slice(6, 8)}` : (s || "—");
 };
-function onlyDigits(s?: string) { return (s || "").replace(/\D+/g, ""); }
-function friendlyLabel(k: string) {
-  const map: Record<string, string> = {
-    ncm: "NCM",
-    produto: "Produto",
-    pleiteante: "Pleiteante",
-    aliqPretendida: "Alíquota Pretendida",
-    aliqAplicada: "Alíquota Aplicada",
-    processoSei: "Processo SEI",
-    tipoPleito: "Tipo de Pleito",
-    notasTecnicas: "Notas Técnicas",
-  };
-  return map[k] || k;
-}
-function findKey(base: Record<string, any>, aliases: string[]): string | undefined {
-  const entries = Object.keys(base || {});
-  for (const k of entries) {
-    const kk = k.toLowerCase();
-    for (const a of aliases) if (kk.includes(a.toLowerCase())) return k;
-  }
-  return undefined;
-}
-function pickRowVal(row: Record<string, any>, aliases: string[]) {
-  const k = findKey(row, aliases);
-  return k ? String(row[k] ?? "") : "";
-}
-function fmtAliq(v?: string) {
-  if (!v) return "";
-  const t = v.trim();
-  if (/%/.test(t) || /ad ?valorem|espec/i.test(t)) return t;
-  const m = t.match(/-?\d+(?:[.,]\d+)?/);
-  if (m) return `${parseFloat(m[0].replace(",", "."))}%`;
-  return t;
-}
+const HIDDEN_KEYS = /(key|pleitokey|__sec|_id|id|timestamp|created|updated|hash|vers[aã]o|revindex)/i;
+const hasContent = (a?: Analise | null) =>
+  !!(a && ((a.resumo && a.resumo.trim()) || (a.comercio && a.comercio.trim()) || (a.tecnica && a.tecnica.trim()) || (a.sugestao && a.sugestao.trim())));
 
-/* -------------------- Extração normalizada do pedido -------------------- */
-type PedidoInfo = {
-  tipo?: string;
-  processoSei?: string;
-  pais?: string;
-  paisPendente?: string;
-  prazoResposta?: string;
-  aliqAtual?: string;
-  aliqPretendida?: string;
-  aliqSolicitada?: string;
-  aliqZero?: string;
-  reducaoII?: string;
-  quota?: string;
-  unidadeQuota?: string;
-  prazo?: string;
-  vigenciaFim?: string;
-  ex?: string;
-  exTarifario?: string;
-  notasTecnicas?: string;
-  posicaoCat?: string;
-  situacao?: string;
-  _matchedKeys: string[];
-};
+/* ========================================================================== */
 
-function extractPedido(base: Record<string, any>): PedidoInfo {
-  const used: string[] = [];
-  const pick = (aliases: string[], fmt?: (v: string) => string) => {
-    const key = findKey(base, aliases);
-    if (!key) return undefined;
-    const raw = String(base[key] ?? "").trim();
-    if (!raw) return undefined;
-    used.push(key);
-    return fmt ? fmt(raw) : raw;
-  };
-
-  return {
-    tipo: pick(["tipo de pleito", "tipo do pleito", "tipo do pedido"]),
-    processoSei: pick(["processo sei (público", "processo sei (publico", "processo sei", "processo"]),
-    pais: pick(["país", "pais "]),
-    paisPendente: pick(["país pendente", "pais pendente"]),
-    prazoResposta: pick(["prazo para resposta", "prazo p/ resposta", "prazo p resposta"]),
-    aliqAtual: pick(["alíquota aplicada", "aliquota aplicada", "alíquota atual", "aliquota atual", "aliq aplicada", "aliq atual"], fmtAliq),
-    aliqPretendida: pick(["alíquota pretendida", "aliquota pretendida", "alíquota pleiteada", "aliquota pleiteada", "pretendida", "pleiteada"], fmtAliq),
-    aliqSolicitada: pick(["alíquota solicitada", "aliquota solicitada"], fmtAliq),
-    aliqZero: pick(["alíquota (pleito a 0%)", "aliquota (pleito a 0)", "pleito a 0"], fmtAliq),
-    reducaoII: pick(["redução do ii", "redução do ii (%)", "reducao do ii", "reducao do ii (%)"]),
-    quota: pick(["quota", "cota"]),
-    unidadeQuota: pick(["unidade quota", "unidade cota"]),
-    prazo: pick(["prazo "]),
-    vigenciaFim: pick(["término vigência da medida em vigor", "termino vigencia da medida em vigor", "prazo da medida vigente", "vigência", "vigencia"]),
-    ex: pick(["ex "]),
-    exTarifario: pick(["ex-tarifário", "ex tarifario", "extarifario"]),
-    notasTecnicas: pick(["notas técnicas", "notas tecnicas"]),
-    posicaoCat: pick(["posição cat", "posicao cat"]),
-    situacao: pick(["situação", "situacao"]),
-    _matchedKeys: used,
-  };
-}
-
-/* --------------------- Matching de linha na pauta --------------------- */
-type Best = { score: number; row: any | null };
-function scoreRow(
-  row: any,
-  pleitoKey: string,
-  ncmAlvo: string,
-  produtoAlvo: string,
-  pleiteanteAlvo: string
-): number {
-  let score = 0;
-
-  const keyRow = (row?.pleitoKey || row?.key || "").trim();
-  if (keyRow && pleitoKey && keyRow === pleitoKey) score += 100;
-
-  const rn = onlyDigits(pickRowVal(row, ["ncm"]));
-  if (rn && ncmAlvo && rn === ncmAlvo) score += 10;
-
-  const rp = pickRowVal(row, ["produto"]).trim().toLowerCase();
-  if (rp && produtoAlvo) {
-    if (rp === produtoAlvo) score += 4;
-    else if (rp.includes(produtoAlvo) || produtoAlvo.includes(rp)) score += 2;
-  }
-
-  const rpl = pickRowVal(row, ["pleiteante"]).trim().toLowerCase();
-  if (rpl && pleiteanteAlvo) {
-    if (rpl === pleiteanteAlvo) score += 3;
-    else if (rpl.includes(pleiteanteAlvo) || pleiteanteAlvo.includes(rpl)) score += 1;
-  }
-
-  return score;
-}
-
-/* ------------------------------- Página ------------------------------- */
 const AnalisePleitoPage: React.FC = () => {
-  const { atrId } = useParams();
+  const { atrId } = useParams<{ atrId: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const params = new URLSearchParams(location.search);
+
+  // sinalizadores vindos do link
   const copyFrom = params.get("copyFrom") || "";
-  const blank = params.get("blank") || "";
-  const isBlank = blank === "1" || blank.toLowerCase?.() === "true";
+  const isBlank = ["1", "true", "yes", "on"].includes((params.get("blank") || "").toLowerCase());
 
   const [atr, setAtr] = useState<Atrib | null>(null);
   const [ficha, setFicha] = useState<Record<string, string>>({});
-  const [pedido, setPedido] = useState<PedidoInfo>({ _matchedKeys: [] });
-  const [form, setForm] = useState<Analise>({});
+  const [pedido, setPedido] = useState<Record<string, string>>({});
+  const [carregando, setCarregando] = useState<boolean>(true);
+  const [salvando, setSalvando] = useState<boolean>(false);
+
+  const [form, setForm] = useState<Analise>({ resumo: "", comercio: "", tecnica: "", sugestao: "" });
   const [pos, setPos] = useState<PosDeliberacao>({});
-  const [salvando, setSalvando] = useState(false);
-  const [carregando, setCarregando] = useState(true);
 
-  // rascunho importável
+  // rascunho só para o fallback de histórico
   const [draft, setDraft] = useState<Analise | null>(null);
-  const [draftLoadedFrom, setDraftLoadedFrom] = useState<string | null>(null);
+  const [draftLoadedFrom, setDraftLoadedFrom] = useState<"histórico" | null>(null);
 
+  /* --------------------------- Carregar atribuição --------------------------- */
   useEffect(() => {
     (async () => {
       if (!atrId) return;
       setCarregando(true);
       try {
         const db = getFirestore();
-        const snap = await getDoc(doc(db, "atribuicoes", atrId));
+        const ref = doc(db, "atribuicoes", atrId);
+        const snap = await getDoc(ref);
+        let v: any = null;
+
+        // cria doc vazio (se vier com seeds)
         if (!snap.exists()) {
-          toast.error("Atribuição não encontrada.");
-          navigate("/minhas-tarefas");
-          return;
+          const seed = {
+            pautaId: params.get("pautaId") || "",
+            pleitoKey: params.get("pleitoKey") || "",
+            ncm: params.get("ncm") || "",
+            produto: params.get("produto") || "",
+            pleiteante: params.get("pleiteante") || "",
+            tituloSecao: params.get("tituloSecao") || "",
+            tipoPleito: params.get("tipoPleito") || "",
+          };
+          const hasSeed = Object.values(seed).some(Boolean);
+          if (isBlank || hasSeed) {
+            await setDoc(
+              ref,
+              { ...seed, status: "Não iniciado", analise: null, updatedAt: serverTimestamp() },
+              { merge: true }
+            );
+            v = seed;
+          } else {
+            toast.error("Atribuição não encontrada.");
+            navigate("/minhas-tarefas");
+            return;
+          }
+        } else {
+          v = snap.data() as any;
         }
-        const v = snap.data() as any;
+
         const atrib: Atrib = {
-          id: snap.id,
+          id: atrId,
           ncm: v?.ncm || "",
           produto: v?.produto || "",
           pleiteante: v?.pleiteante || "",
+          tipoPleito: v?.tipoPleito || "",
           tituloSecao: v?.tituloSecao || "",
           pautaId: v?.pautaId || "",
-          status: v?.status || "novo",
-          analise: v?.analise || null,
           pleitoKey: v?.pleitoKey || "",
+          status: v?.status || "Não iniciado",
+          linhaPauta: v?.linhaPauta || null,
+          analise: v?.analise || null,
           posDeliberacao: v?.posDeliberacao || null,
         };
         setAtr(atrib);
-        setForm(isBlank ? {} : (atrib.analise || {}));  // << em branco quando ?blank=1
         setPos(atrib.posDeliberacao || {});
 
-        // carrega rascunho se copyFrom veio e NÃO estiver em modo "blank"
-        if (copyFrom && !isBlank) {
+        // ======= REGRAS DE INICIALIZAÇÃO DO FORM =======
+        // 1) copyFrom => pré-preenche (sem banner) e grava, se a atual estava vazia
+        if (copyFrom) {
           try {
-            const fromSnap = await getDoc(doc(db, "atribuicoes", copyFrom));
-            if (fromSnap.exists()) {
-              const fromData = fromSnap.data() as any;
-              const ana: Analise | null = fromData?.analise || null;
-              if (ana && (ana.resumo || ana.comercio || ana.tecnica || ana.sugestao)) {
-                setDraft(ana);
-                setDraftLoadedFrom(fromSnap.id);
+            const src = await getDoc(doc(db, "atribuicoes", copyFrom));
+            if (src.exists()) {
+              const sd: any = src.data();
+              const copied: Analise = {
+                resumo: sd?.analise?.resumo || "",
+                comercio: sd?.analise?.comercio || "",
+                tecnica: sd?.analise?.tecnica || "",
+                sugestao: sd?.analise?.sugestao || "",
+              };
+              setForm(copied);
+              if (!hasContent(atrib.analise)) {
+                try {
+                  await updateDoc(ref, {
+                    analise: {
+                      resumo: copied.resumo || "",
+                      comercio: copied.comercio || "",
+                      tecnica: copied.tecnica || "",
+                      sugestao: copied.sugestao || "",
+                    },
+                    updatedAt: serverTimestamp(),
+                  });
+                } catch {/* noop */}
               }
             }
-          } catch {
-            /* silencioso */
-          }
+          } catch {/* noop */}
         }
-
-        // fallback do HISTÓRICO se NÃO for blank e não veio copyFrom e análise atual está vazia
-        try {
-          const temAtual =
-            !!((atrib?.analise?.resumo && atrib.analise.resumo.trim()) ||
-               (atrib?.analise?.comercio && atrib.analise.comercio.trim()) ||
-               (atrib?.analise?.tecnica && atrib.analise.tecnica.trim()) ||
-               (atrib?.analise?.sugestao && atrib.analise.sugestao.trim()));
-          if (!copyFrom && !isBlank && !temAtual && (atrib?.pleitoKey || v?.pleitoKey)) {
-            const hist = await getHistoricoByPleitoKey(getFirestore(), (atrib?.pleitoKey || v?.pleitoKey)!);
-            if (hist && (hist.ultimoResumo || hist.ultimoComercio || hist.ultimaTecnica || hist.ultimaSugestao)) {
-              setDraft({
-                resumo: hist.ultimoResumo || "",
-                comercio: hist.ultimoComercio || "",
-                tecnica: hist.ultimaTecnica || "",
-                sugestao: hist.ultimaSugestao || "",
-              });
-              setDraftLoadedFrom("histórico");
-            }
-          }
-        } catch { /* não bloqueia a página */ }
-
-        // Matching de linha da pauta
-        let line: any = v?.linhaPauta || null;
-        if (!line && atrib.pautaId) {
-          const pautaSnap = await getDoc(doc(db, "pautas", atrib.pautaId));
-          const pauta = pautaSnap.data() as any;
-          const sections: any[] = Array.isArray(pauta?.sections)
-            ? pauta.sections
-            : Array.isArray(pauta?.secoes)
-            ? pauta.secoes
-            : [];
-
-          const alvoKey = (atrib.pleitoKey || `${atrib.ncm}|${atrib.produto}|${atrib.pleiteante}`).trim();
-          const ncmAlvo = onlyDigits(atrib.ncm || "");
-          const produtoAlvo = (atrib.produto || "").trim().toLowerCase();
-          const pleiteanteAlvo = (atrib.pleiteante || "").trim().toLowerCase();
-
-          const best: Best = { score: -1, row: null };
-          for (const s of sections) {
-            const rows: any[] = Array.isArray(s?.rows) ? s.rows : [];
-            for (const r of rows) {
-              const sc = scoreRow(r, alvoKey, ncmAlvo, produtoAlvo, pleiteanteAlvo);
-              if (sc > best.score) {
-                best.score = sc;
-                best.row = r;
+        // 2) blank=1 (sem copyFrom) => força tela vazia (ignora conteúdo existente e não mostra banner)
+        else if (isBlank) {
+          setForm({ resumo: "", comercio: "", tecnica: "", sugestao: "" });
+          setDraft(null);
+          setDraftLoadedFrom(null);
+        }
+        // 3) normal => carrega o que já existe; se vazio, oferece rascunho do histórico
+        else {
+          setForm(atrib.analise || {});
+          try {
+            const temAtual = hasContent(atrib.analise);
+            if (!temAtual && (atrib?.pleitoKey || v?.pleitoKey)) {
+              const hist = await getHistoricoByPleitoKey(db, (atrib?.pleitoKey || v?.pleitoKey)!);
+              if (hist && (hist.ultimoResumo || hist.ultimoComercio || hist.ultimaTecnica || hist.ultimaSugestao)) {
+                setDraft({
+                  resumo: hist.ultimoResumo || "",
+                  comercio: hist.ultimoComercio || "",
+                  tecnica: hist.ultimaTecnica || "",
+                  sugestao: hist.ultimaSugestao || "",
+                });
+                setDraftLoadedFrom("histórico");
               }
-              if (best.score >= 100) break;
             }
-            if (best.score >= 100) break;
-          }
-          line = best.row;
+          } catch { /* noop */ }
         }
 
-        // Ficha amigável e extração do pedido
+        // Monta ficha/pedido a partir da linha (quando disponível)
+        const base: any = v?.linhaPauta || {};
         const fichaLocal: Record<string, string> = {};
-        const base = line || {};
-        for (const [k, val] of Object.entries(base)) {
+        Object.entries(base).forEach(([k, val]) => {
           const keyLower = k.toLowerCase();
-          if (HIDDEN_KEYS.test(keyLower)) continue;
-          if (["key", "pleitoKey"].includes(keyLower)) continue;
-          let display = String(val ?? "").trim();
-          if (!display) continue;
-          if (keyLower === "ncm") display = fmtNcm(display);
-          fichaLocal[friendlyLabel(k)] = display;
-        }
-        if (!fichaLocal["NCM"] && atrib.ncm) fichaLocal["NCM"] = fmtNcm(atrib.ncm);
-        if (!fichaLocal["Produto"] && atrib.produto) fichaLocal["Produto"] = atrib.produto;
-        if (!fichaLocal["Pleiteante"] && atrib.pleiteante) fichaLocal["Pleiteante"] = atrib.pleiteante;
-
+          if (HIDDEN_KEYS.test(keyLower)) return;
+          const str = String(val ?? "").trim();
+          if (!str) return;
+          fichaLocal[mapHeader(k)] = str;
+        });
         setFicha(fichaLocal);
-        setPedido(extractPedido(base));
+        setPedido(extrairPedido(base));
       } finally {
         setCarregando(false);
       }
     })();
-  }, [atrId, navigate, copyFrom, isBlank]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [atrId, copyFrom, isBlank]);
 
-  const fichaPairsFull = useMemo(() => Object.entries(ficha), [ficha]);
-
-  // oculta da grade os campos já exibidos no topo/resumo
-  const fichaPairs = useMemo(() => {
-    const omit = new Set((pedido._matchedKeys || []).map((k) => friendlyLabel(k)));
-    omit.add("Produto");
-    omit.add("Pleiteante");
-    omit.add("NCM");
-    return fichaPairsFull.filter(([k]) => !omit.has(k));
-  }, [fichaPairsFull, pedido._matchedKeys]);
-
-  async function salvar(statusForcado?: "em_analise" | "concluido") {
-    if (!atr) return;
+  /* ------------------------------ salvar análise ------------------------------ */
+  async function salvar(status?: "em_analise" | "concluido") {
+    if (!atrId) return;
     setSalvando(true);
     try {
       const db = getFirestore();
@@ -342,6 +210,24 @@ const AnalisePleitoPage: React.FC = () => {
           tecnica: form.tecnica || "",
           sugestao: form.sugestao || "",
         },
+        updatedAt: serverTimestamp(),
+      };
+      if (status) payload.status = status;
+      await updateDoc(doc(db, "atribuicoes", atrId), payload);
+      toast.success("Análise salva.");
+      try { await upsertHistoricoFromAtribuicao(db, atrId); } catch {}
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  /* --------------------------- salvar pós-deliberação -------------------------- */
+  async function salvarPosDeliberacao() {
+    if (!atrId) return;
+    setSalvando(true);
+    try {
+      const db = getFirestore();
+      await updateDoc(doc(db, "atribuicoes", atrId), {
         posDeliberacao: {
           data: pos.data || "",
           resultado: pos.resultado || "",
@@ -349,336 +235,222 @@ const AnalisePleitoPage: React.FC = () => {
           numeroAta: pos.numeroAta || "",
         },
         updatedAt: serverTimestamp(),
-      };
-      if (statusForcado) payload.status = statusForcado;
-      else if (!atr.status || atr.status === "novo") payload.status = "em_analise";
+      });
+      toast.success("Encaminhamento pós-deliberação salvo.");
+    } finally { setSalvando(false); }
+  }
 
-      await updateDoc(doc(db, "atribuicoes", atr.id), payload);
-
-      // upsert no histórico por pleitoKey
-      try {
-        await upsertHistoricoFromAtribuicao(db, {
-          id: atr.id,
-          pautaId: atr.pautaId,
-          pleitoKey: atr.pleitoKey,
-          ncm: atr.ncm,
-          produto: atr.produto,
-          pleiteante: atr.pleiteante,
-          analise: {
-            resumo: payload.analise?.resumo || "",
-            comercio: payload.analise?.comercio || "",
-            tecnica: payload.analise?.tecnica || "",
-            sugestao: payload.analise?.sugestao || "",
-          },
-          updatedAt: new Date(),
-        } as any);
-      } catch { /* não interrompe o fluxo */ }
-
-      toast.success(statusForcado === "concluido" ? "Análise concluída." : "Análise salva.");
-      if (statusForcado === "concluido") navigate("/");
-    } catch (e) {
-      console.error(e);
-      toast.error("Falha ao salvar.");
-    } finally {
-      setSalvando(false);
+  /* ----------------------------- rótulos amigáveis ---------------------------- */
+  function mapHeader(k: string) {
+    const map: Record<string, string> = {
+      ncm: "NCM",
+      produto: "Produto",
+      pleiteante: "Pleiteante",
+      "tipo de pleito": "Tipo de Pleito",
+      "tipo do pleito": "Tipo de Pleito",
+      "tipo do pedido": "Tipo de Pleito",
+      processo: "Processo",
+      "processo sei": "Processo SEI",
+      país: "País",
+      pais: "País",
+      "país pendente": "País (pendente)",
+      "pais pendente": "País (pendente)",
+      "prazo de resposta": "Prazo de Resposta",
+      "prazo resposta": "Prazo de Resposta",
+      "fundamentação técnica": "Fundamentação Técnica",
+      "fundamentacao tecnica": "Fundamentação Técnica",
+      "justificativa econômica": "Justificativa Econômica",
+      "justificativa economica": "Justificativa Econômica",
+      situação: "Situação",
+      situacao: "Situação",
+      "notas técnicas": "Notas Técnicas",
+      "notas tecnicas": "Notas Técnicas",
+      "nota técnica": "Notas Técnicas",
+      "nota tecnica": "Notas Técnicas",
+    };
+    return map[k] || k;
+  }
+  function findKey(base: Record<string, any>, aliases: string[]): string | undefined {
+    const keys = Object.keys(base || {});
+    for (const k of keys) {
+      const kk = k.toLowerCase();
+      if (aliases.some((a) => kk.includes(a.toLowerCase()))) return k;
     }
+    return undefined;
+  }
+  function pickRow(base: Record<string, any>, aliases: string[]) {
+    const k = findKey(base, aliases);
+    return k ? String(base[k] ?? "") : "";
+  }
+  function extrairPedido(base: Record<string, any>) {
+    const pick = (aliases: string[], fmt?: (v: string) => string) => {
+      const key = findKey(base, aliases);
+      if (!key) return undefined;
+      const raw = String(base[key] ?? "").trim();
+      if (!raw) return undefined;
+      return fmt ? fmt(raw) : raw;
+    };
+    const prazoResposta = pick(["prazo de resposta", "prazo resposta", "prazo"]);
+    return {
+      tipo: pick(["tipo de pleito", "tipo do pleito", "tipo do pedido"]),
+      processoSei: pick(["processo sei (público", "processo sei (publico", "processo sei", "processo"]),
+      pais: pick(["país", "pais "]),
+      paisPendente: pick(["país pendente", "pais pendente"]),
+      prazoResposta,
+      fundamentacaoTecnica: pick(["fundamentação técnica", "fundamentacao tecnica"]),
+      justificativaEconomica: pick(["justificativa econômica", "justificativa economica"]),
+      situacao: pick(["situação", "situacao"]),
+      notasTecnicas: pick(["notas técnicas", "notas tecnicas", "nota técnica", "nota tecnica"]),
+    };
   }
 
-  function applyDraftIntoForm() {
-    if (!draft) return;
-    setForm((f) => ({
-      resumo: f.resumo || draft.resumo || "",
-      comercio: f.comercio || draft.comercio || "",
-      tecnica: f.tecnica || draft.tecnica || "",
-      sugestao: f.sugestao || draft.sugestao || "",
-    }));
-    toast.success("Rascunho aplicado aos campos vazios.");
-    setDraft(null);
+  /* --------------------------------- UI --------------------------------- */
+  const temAnaliseAtual = useMemo(() => hasContent(form), [form]);
+  const showDraftBanner = !!draft && !temAnaliseAtual && draftLoadedFrom === "histórico";
+
+  if (carregando || !atr) {
+    return (
+      <div className="p-6">
+        <div className="animate-pulse space-y-3">
+          <div className="h-6 w-64 bg-gray-200 rounded" />
+          <div className="h-4 w-96 bg-gray-200 rounded" />
+          <div className="h-4 w-80 bg-gray-200 rounded" />
+        </div>
+      </div>
+    );
   }
-
-  if (carregando) return <div className="p-6 text-slate-500">Carregando…</div>;
-  if (!atr) return <div className="p-6 text-slate-500">Atribuição não encontrada.</div>;
-
-  const produtoCurto = shorten(atr.produto);
-  const hasLongProduto = (atr.produto || "").trim().length > SHORT_LIMIT;
-
-  // valores para o topo da ficha
-  const topoProduto = ficha["Produto"] || atr.produto || "—";
-  const topoPleiteante = ficha["Pleiteante"] || atr.pleiteante || "—";
-  const topoNcm = ficha["NCM"] || fmtNcm(atr.ncm) || "—";
 
   return (
-    <div className="p-2 md:p-4 lg:p-6 space-y-6">
-      {/* Banner de rascunho disponível (não aparece quando ?blank=1) */}
-      {draft && (
-        <div className="rounded-xl border border-amber-300 bg-amber-50 text-amber-900 p-4 flex items-center justify-between gap-3">
-          <div className="text-sm">
-            <b>Rascunho encontrado</b>
-            {draftLoadedFrom ? ` (origem: ${draftLoadedFrom})` : ""}. Você pode
-            aplicar os textos anteriores aos <u>campos vazios</u> desta análise.
+    <div className="w-full p-6 space-y-6">
+      {showDraftBanner && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900">
+          <div className="font-medium">
+            Rascunho encontrado (origem: <strong>{draftLoadedFrom}</strong>)
           </div>
-          <div className="flex gap-2">
+          <div className="text-sm mt-1">
+            Você pode aplicar os textos anteriores aos <em>campos vazios</em> desta análise.
+          </div>
+          <div className="mt-3 flex gap-2">
             <button
-              className="px-3 py-1.5 rounded-lg border border-amber-300 hover:bg-amber-100"
-              onClick={() => setDraft(null)}
+              className="px-3 py-1.5 rounded border text-sm hover:bg-white"
+              onClick={() => {
+                setForm((f) => ({
+                  resumo: f.resumo || (draft?.resumo || ""),
+                  comercio: f.comercio || (draft?.comercio || ""),
+                  tecnica: f.tecnica || (draft?.tecnica || ""),
+                  sugestao: f.sugestao || (draft?.sugestao || ""),
+                }));
+                setDraft(null);
+              }}
             >
-              Descartar
+              Aplicar aos campos vazios
             </button>
-            <button
-              className="px-3 py-1.5 rounded-lg bg-amber-500 text-white hover:bg-amber-600"
-              onClick={applyDraftIntoForm}
-            >
-              Aplicar rascunho
+            <button className="px-3 py-1.5 rounded border text-sm hover:bg-white" onClick={() => setDraft(null)}>
+              Dispensar rascunho
             </button>
           </div>
         </div>
       )}
 
-      {/* Cabeçalho enxuto */}
-      <div className="rounded-2xl border bg-white p-4 sm:p-5 shadow-sm">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div className="space-y-1 min-w-0">
-            <div className="text-xs text-slate-500 uppercase tracking-wide">NCM</div>
-            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-              <span className="text-xl md:text-2xl font-semibold tracking-tight">{fmtNcm(atr.ncm)}</span>
-              <span className="text-base md:text-lg text-slate-800 truncate">
-                — {produtoCurto}
-                {hasLongProduto && (
-                  <>
-                    {" "}
-                    <a href="#ficha-pleito" className="text-blue-600 hover:underline" title="Ver descrição completa na ficha">
-                      ver descrição completa
-                    </a>
-                  </>
-                )}
-              </span>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 mt-2">
-              <span className="inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs">
-                <b className="mr-1">Seção:</b> {atr.tituloSecao || "—"}
-              </span>
-              <span className="inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs">
-                <b className="mr-1">Pleiteante:</b> {atr.pleiteante || "—"}
-              </span>
-            </div>
+      {/* Cabeçalho */}
+      <section className="rounded-xl border bg-white/70 p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-sm text-gray-500">Seção: <span className="font-medium">{atr.tituloSecao || "—"}</span></div>
+            <h1 className="mt-1 text-xl font-semibold">{fmtNCM(atr.ncm)} — {atr.produto || "Produto não identificado"}</h1>
+            <div className="text-sm text-gray-600 mt-1"><span className="font-medium">Pleiteante:</span> {atr.pleiteante || "—"}</div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap gap-2">
             <button
               className="px-4 py-2.5 rounded-xl border hover:bg-gray-50"
               onClick={() =>
                 atr.pautaId
-                  ? window.open(
-                      `/pauta/${encodeURIComponent(atr.pautaId)}?secao=${encodeURIComponent(atr.tituloSecao || "")}`,
-                      "_blank"
-                    )
+                  ? window.open(`/pauta/${encodeURIComponent(atr.pautaId)}?secao=${encodeURIComponent(atr.tituloSecao || "")}`, "_blank")
                   : toast.error("Pauta sem ID.")
               }
             >
               Abrir pauta
             </button>
-            <button
-              className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
-              disabled={salvando}
-              onClick={() => salvar("em_analise")}
-            >
+            <button className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700" disabled={salvando} onClick={() => salvar("em_analise")}>
               Salvar análise
             </button>
-            <button
-              className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700"
-              disabled={salvando}
-              onClick={() => salvar("concluido")}
-            >
-              Concluir análise
+            <button className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700" disabled={salvando} onClick={() => salvar("concluido")}>
+              Concluir
             </button>
           </div>
         </div>
-      </div>
+      </section>
 
       {/* Ficha do Pleito */}
-      <section id="ficha-pleito" className="rounded-2xl border bg-white shadow-sm">
-        <header className="p-4 sm:p-5 border-b flex items-center gap-2">
-          <FileText className="w-4 h-4 text-slate-600" />
-          <h2 className="text-base sm:text-lg font-semibold">
-            Ficha do Pleito <span className="text-slate-500 font-normal">(dados da pauta)</span>
-          </h2>
-        </header>
+      <section className="rounded-xl border bg-white/70 p-4">
+        <div className="flex items-center gap-2 text-gray-700">
+          <FileText className="w-4 h-4" />
+          <h2 className="font-semibold">Ficha do Pleito (dados da pauta)</h2>
+        </div>
 
-        <div className="p-5 pt-4">
-          {/* TOPO: Produto / Pleiteante (+ NCM) */}
-          <div className="rounded-xl bg-slate-50 border p-4 mb-5">
-            <div className="flex flex-wrap items-center gap-2 mb-3">
-              <span className="inline-flex items-center rounded-full bg-white border px-2.5 py-0.5 text-xs text-slate-700">
-                NCM: <b className="ml-1 text-slate-900">{topoNcm}</b>
-              </span>
-            </div>
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Info label="NCM" value={fmtNCM(atr.ncm)} />
+          <Info label="Tipo de Pleito" value={atr.tipoPleito || "—"} />
+          <Info label="Produto (pleito)" value={atr.produto || "—"} className="md:col-span-2" />
+          <Info label="Pleiteante" value={atr.pleiteante || "—"} className="md:col-span-2" />
+        </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <div className="text-xs text-slate-500 mb-1">Produto (pleito)</div>
-                <div className="text-slate-900 font-medium leading-relaxed whitespace-pre-wrap">
-                  {topoProduto}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-500 mb-1">Pleiteante</div>
-                <div className="text-slate-900 font-medium">{topoPleiteante}</div>
-              </div>
+        {Object.keys(pedido || {}).length > 0 && (
+          <>
+            <div className="mt-5 text-sm text-gray-500">Dados resumidos</div>
+            <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
+              {Object.entries(pedido).map(([k, v]) => (v ? <Info key={k} label={mapHeader(k)} value={String(v)} /> : null))}
             </div>
-          </div>
+          </>
+        )}
 
-          {/* RESUMO DO PEDIDO (dinâmico) */}
-          {(pedido.tipo ||
-            pedido.processoSei ||
-            pedido.pais ||
-            pedido.paisPendente ||
-            pedido.prazoResposta ||
-            pedido.aliqAtual ||
-            pedido.aliqPretendida ||
-            pedido.aliqSolicitada ||
-            pedido.aliqZero ||
-            pedido.reducaoII ||
-            pedido.quota ||
-            pedido.unidadeQuota ||
-            pedido.prazo ||
-            pedido.vigenciaFim ||
-            pedido.ex ||
-            pedido.exTarifario ||
-            pedido.situacao ||
-            pedido.notasTecnicas ||
-            pedido.posicaoCat) && (
-            <div className="rounded-xl border bg-slate-50 p-4 mb-5">
-              <div className="text-slate-700 font-medium mb-2">Resumo do Pedido</div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                {pedido.tipo && <div><b>Tipo:</b> {pedido.tipo}</div>}
-                {pedido.processoSei && <div><b>Proc. SEI:</b> {pedido.processoSei}</div>}
-                {pedido.pais && <div><b>País:</b> {pedido.pais}</div>}
-                {pedido.paisPendente && <div><b>País pendente:</b> {pedido.paisPendente}</div>}
-                {pedido.prazoResposta && <div><b>Prazo p/ resposta:</b> {pedido.prazoResposta}</div>}
-                {pedido.aliqAtual && <div><b>Alíquota aplicada:</b> {pedido.aliqAtual}</div>}
-                {pedido.aliqPretendida && <div><b>Alíquota pretendida:</b> {pedido.aliqPretendida}</div>}
-                {pedido.aliqSolicitada && <div><b>Alíquota solicitada:</b> {pedido.aliqSolicitada}</div>}
-                {pedido.aliqZero && <div><b>Pleito a 0%:</b> {pedido.aliqZero}</div>}
-                {pedido.reducaoII && <div><b>Redução do II:</b> {pedido.reducaoII}</div>}
-                {pedido.quota && <div><b>Quota:</b> {pedido.quota}</div>}
-                {pedido.unidadeQuota && <div><b>Unidade quota:</b> {pedido.unidadeQuota}</div>}
-                {pedido.prazo && <div><b>Prazo:</b> {pedido.prazo}</div>}
-                {pedido.vigenciaFim && <div><b>Término vigência:</b> {pedido.vigenciaFim}</div>}
-                {pedido.ex && <div><b>EX:</b> {pedido.ex}</div>}
-                {pedido.exTarifario && <div><b>Ex-tarifário:</b> {pedido.exTarifario}</div>}
-                {pedido.situacao && <div><b>Situação:</b> {pedido.situacao}</div>}
-                {pedido.posicaoCat && <div><b>Posição CAT:</b> {pedido.posicaoCat}</div>}
-              </div>
-              {pedido.notasTecnicas && (
-                <div className="mt-3 text-sm">
-                  <b>Notas Técnicas:</b>
-                  <div className="whitespace-pre-wrap">{pedido.notasTecnicas}</div>
-                </div>
-              )}
+        {Object.keys(ficha || {}).length > 0 && (
+          <>
+            <div className="mt-5 text-sm text-gray-500">Outros campos</div>
+            <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
+              {Object.entries(ficha).map(([k, v]) => (v ? <Info key={k} label={k} value={String(v)} /> : null))}
             </div>
-          )}
+          </>
+        )}
+      </section>
 
-          {/* DEMAIS CAMPOS DA FICHA (não repetidos) */}
-          {fichaPairs.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {fichaPairs.map(([k, v]) => (
-                <div key={k} className="rounded-lg bg-white border p-3">
-                  <div className="text-xs text-slate-500 mb-1">{k}</div>
-                  <div className="text-slate-900 whitespace-pre-wrap">{v || "—"}</div>
-                </div>
-              ))}
-            </div>
-          )}
+      {/* Formulário de análise */}
+      <section className="rounded-xl border bg-white/70 p-4">
+        <h2 className="font-semibold text-gray-700">Análise técnica</h2>
+
+        <div className="mt-3 grid grid-cols-1 gap-4">
+          <Field label="Resumo" placeholder="Escreva um resumo objetivo do pedido e do contexto..." value={form.resumo || ""} onChange={(v) => setForm((f) => ({ ...f, resumo: v }))} />
+          <Field label="Análise de comércio" placeholder="Aspectos de comércio exterior, impactos, etc..." value={form.comercio || ""} onChange={(v) => setForm((f) => ({ ...f, comercio: v }))} />
+          <Field label="Análise técnica" placeholder="Exame técnico do produto, norma, classificação etc..." value={form.tecnica || ""} onChange={(v) => setForm((f) => ({ ...f, tecnica: v }))} />
+          <Field label="Sugestão" placeholder="Encaminhamento sugerido..." value={form.sugestao || ""} onChange={(v) => setForm((f) => ({ ...f, sugestao: v }))} />
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button className="px-4 py-2.5 rounded-xl border hover:bg-gray-50" disabled={salvando} onClick={() => salvar()}>
+            Salvar rascunho
+          </button>
+          <button className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60" disabled={salvando} onClick={() => salvar("em_analise")}>
+            Salvar e continuar
+          </button>
+          <button className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60" disabled={salvando} onClick={() => salvar("concluido")}>
+            Concluir
+          </button>
         </div>
       </section>
 
-      {/* Formulário da análise */}
-      <section className="rounded-2xl border bg-white shadow-sm">
-        <header className="p-4 sm:p-5 border-b">
-          <h2 className="text-base sm:text-lg font-semibold">Análise técnica</h2>
-        </header>
-        <div className="p-5 space-y-4">
-          <div>
-            <label className="block text-sm text-slate-600 mb-1">Resumo</label>
-            <textarea
-              className="w-full border rounded-lg p-2 min-h-[220px] resize-y"
-              value={form.resumo || ""}
-              onChange={(e) => setForm((f) => ({ ...f, resumo: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-slate-600 mb-1">Aspectos de Comércio Exterior</label>
-            <textarea
-              className="w-full border rounded-lg p-2 min-h-[220px] resize-y"
-              value={form.comercio || ""}
-              onChange={(e) => setForm((f) => ({ ...f, comercio: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-slate-600 mb-1">Análise Técnica</label>
-            <textarea
-              className="w-full border rounded-lg p-2 min-h-[220px] resize-y"
-              value={form.tecnica || ""}
-              onChange={(e) => setForm((f) => ({ ...f, tecnica: e.target.value }))}
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-slate-600 mb-1">Sugestão</label>
-            <textarea
-              className="w-full border rounded-lg p-2 min-h-[60px] max-h-[100px] resize-y"
-              rows={3}
-              value={form.sugestao || ""}
-              onChange={(e) => setForm((f) => ({ ...f, sugestao: e.target.value }))}
-            />
-          </div>
+      {/* Pós-deliberação */}
+      <section className="rounded-xl border bg-white/70 p-4">
+        <h2 className="font-semibold text-gray-700">Encaminhamento pós-deliberação</h2>
 
-          <div className="flex items-center gap-2 pt-2">
-            <button
-              className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
-              disabled={salvando}
-              onClick={() => salvar("em_analise")}
-            >
-              Salvar análise
-            </button>
-            <button
-              className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
-              disabled={salvando}
-              onClick={() => salvar("concluido")}
-            >
-              Concluir análise
-            </button>
-          </div>
-        </div>
-      </section>
-
-      {/* Encaminhamento ao GECEX */}
-      <section className="rounded-2xl border bg-white shadow-sm">
-        <header className="p-4 sm:p-5 border-b">
-          <h2 className="text-base sm:text-lg font-semibold">Encaminhamento ao GECEX</h2>
-        </header>
-        <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm text-slate-600 mb-1">Data da deliberação</label>
-            <input
-              type="date"
-              className="w-full border rounded-lg p-2"
-              value={pos.data || ""}
-              onChange={(e) => setPos((p) => ({ ...p, data: e.target.value }))}
-            />
+            <label className="text-sm text-gray-600">Data</label>
+            <input type="date" className="mt-1 w-full rounded border px-3 py-2" value={pos.data || ""} onChange={(e) => setPos((p) => ({ ...p, data: e.target.value }))} />
           </div>
           <div>
-            <label className="block text-sm text-slate-600 mb-1">Resultado</label>
-            <select
-              className="w-full border rounded-lg p-2"
-              value={pos.resultado || ""}
-              onChange={(e) =>
-                setPos((p) => ({
-                  ...p,
-                  resultado: (e.target.value || "") as PosDeliberacao["resultado"],
-                }))
-              }
-            >
+            <label className="text-sm text-gray-600">Resultado</label>
+            <select className="mt-1 w-full rounded border px-3 py-2" value={pos.resultado || ""} onChange={(e) => setPos((p) => ({ ...p, resultado: (e.target.value || "") as PosDeliberacao["resultado"] }))}>
               <option value="">—</option>
               <option value="aprovado">Aprovado</option>
               <option value="aprovado_com_ajustes">Aprovado com ajustes</option>
@@ -689,31 +461,17 @@ const AnalisePleitoPage: React.FC = () => {
           </div>
 
           <div className="md:col-span-2">
-            <label className="block text-sm text-slate-600 mb-1">Encaminhamento / observações</label>
-            <textarea
-              className="w-full border rounded-lg p-2 min-h-[120px] resize-y"
-              value={pos.encaminhamento || ""}
-              onChange={(e) => setPos((p) => ({ ...p, encaminhamento: e.target.value }))}
-              placeholder="Ex.: Encaminhar à GECEX com recomendação XYZ…"
-            />
+            <label className="text-sm text-gray-600">Encaminhamento / Observações</label>
+            <textarea className="mt-1 w-full rounded border px-3 py-2" rows={4} value={pos.encaminhamento || ""} onChange={(e) => setPos((p) => ({ ...p, encaminhamento: e.target.value }))} placeholder="Descreva detalhes do encaminhamento, observações, etc." />
           </div>
 
           <div className="md:col-span-2">
-            <label className="block text-sm text-slate-600 mb-1">Nº da ata / processo SEI (opcional)</label>
-            <input
-              className="w-full border rounded-lg p-2"
-              value={pos.numeroAta || ""}
-              onChange={(e) => setPos((p) => ({ ...p, numeroAta: e.target.value }))}
-              placeholder="Ex.: ATA 123/2025 — SEI 1234567"
-            />
+            <label className="text-sm text-gray-600">Nº de ATA/SEI (opcional)</label>
+            <input className="mt-1 w-full rounded border px-3 py-2" value={pos.numeroAta || ""} onChange={(e) => setPos((p) => ({ ...p, numeroAta: e.target.value }))} placeholder="Ex.: ATA 123/2025 ou SEI 00000.000000/2025-11" />
           </div>
 
-          <div className="md:col-span-2 flex items-center gap-2">
-            <button
-              className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60"
-              disabled={salvando}
-              onClick={() => salvar()}
-            >
+          <div className="md:col-span-2">
+            <button className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60" disabled={salvando} onClick={() => salvarPosDeliberacao()}>
               Salvar encaminhamento
             </button>
           </div>
@@ -724,3 +482,28 @@ const AnalisePleitoPage: React.FC = () => {
 };
 
 export default AnalisePleitoPage;
+
+/* ------------------------------- Sub-componentes ------------------------------ */
+function Info(props: { label: string; value: string; className?: string }) {
+  return (
+    <div className={props.className}>
+      <div className="text-xs text-gray-500">{props.label}</div>
+      <div className="font-medium">{props.value || "—"}</div>
+    </div>
+  );
+}
+
+function Field(props: { label: string; placeholder?: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <label className="text-sm text-gray-600">{props.label}</label>
+      <textarea
+        className="mt-1 w-full rounded border px-3 py-2"
+        rows={props.label.toLowerCase().includes("resumo") ? 4 : 6}
+        placeholder={props.placeholder}
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
+      />
+    </div>
+  );
+}

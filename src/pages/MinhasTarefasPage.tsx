@@ -92,14 +92,9 @@ type PautaDoc = {
 };
 
 /* ==================== Helpers ==================== */
-const norm = (s?: string) =>
-  (s ?? "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-
-const normKey = (s?: string) =>
-  norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-
+const norm = (s?: string) => (s ?? "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
+const normKey = (s?: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const onlyDigits = (s?: string) => (s ?? "").replace(/\D+/g, "");
-
 const renderStr = (v: any, fallback = "—") =>
   typeof v === "string" ? (norm(v) || fallback) : typeof v === "number" ? String(v) : fallback;
 
@@ -111,7 +106,6 @@ const toMillis = (t: any): number => {
   if (t?.seconds) return t.seconds * 1000 + (t.nanoseconds || 0) / 1e6;
   return 0;
 };
-
 const uploadTs = (p: Partial<PautaDoc>) =>
   toMillis(p.createdAt) || toMillis(p.updatedAt) || toMillis(p.meetingDate);
 
@@ -180,44 +174,30 @@ const pautaCache = new Map<string, PautaDoc>();
 
 function flattenPleitosFromPauta(pauta: PautaDoc) {
   const out: (AnyRow & { __sec?: string })[] = [];
-  const secoes = Array.isArray(pauta?.secoes)
-    ? pauta.secoes
-    : Array.isArray(pauta?.sections)
-    ? pauta.sections
-    : [];
+  const secoes = Array.isArray(pauta?.secoes) ? pauta.secoes : Array.isArray(pauta?.sections) ? pauta.sections : [];
   for (const sec of secoes) {
     const secTitle = renderStr(sec?.title ?? sec?.titulo ?? "", "");
 
-    if (Array.isArray(sec?.rows)) {
-      sec.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
-    }
+    if (Array.isArray(sec?.rows)) sec.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
 
     if (Array.isArray(sec?.tabelas)) {
       sec.tabelas.forEach((tb: any) => {
-        if (Array.isArray(tb?.rows)) {
-          tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
-        }
+        if (Array.isArray(tb?.rows)) tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
       });
     }
 
     if (Array.isArray(sec?.tables)) {
       sec.tables.forEach((tb: any) => {
-        if (Array.isArray(tb?.rows)) {
-          tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
-        }
+        if (Array.isArray(tb?.rows)) tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
       });
     }
 
-    if (Array.isArray(sec?.pleitos)) {
-      sec.pleitos.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
-    }
+    if (Array.isArray(sec?.pleitos)) sec.pleitos.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
   }
 
   if (Array.isArray((pauta as any)?.tabelas)) {
     (pauta as any).tabelas.forEach((tb: any) => {
-      if (Array.isArray(tb?.rows)) {
-        tb.rows.forEach((r: any) => out.push({ ...r, __sec: "" }));
-      }
+      if (Array.isArray(tb?.rows)) tb.rows.forEach((r: any) => out.push({ ...r, __sec: "" }));
     });
   }
   if (Array.isArray((pauta as any)?.pleitos)) {
@@ -269,7 +249,7 @@ async function getRemovedKeysByBaseIds(db: any, baseIds: string[]): Promise<Reco
   return out;
 }
 
-/** Lista TODAS as pautas e ordena por linha do tempo de upload (desc): createdAt > updatedAt > meetingDate. */
+/** Lista TODAS as pautas e ordena por linha do tempo (desc): createdAt > updatedAt > meetingDate. */
 async function fetchAllPautasOrdered(db: any): Promise<PautaDoc[]> {
   try {
     const snap = await getDocs(collection(db, "pautas"));
@@ -282,7 +262,7 @@ async function fetchAllPautasOrdered(db: any): Promise<PautaDoc[]> {
   }
 }
 
-/** Nome-base (para agrupar versões) = title > reuniao > meeting > slug, removendo um sufixo "(RETIFICADA ...)" se já veio. */
+/** Nome-base para agrupar versões */
 function baseNameForGrouping(p: PautaDoc): string {
   const raw =
     renderStr(p.title, "") ||
@@ -290,111 +270,57 @@ function baseNameForGrouping(p: PautaDoc): string {
     renderStr(p.meeting, "") ||
     renderStr(p.slug, "") ||
     "";
-  // remove qualquer "(retificada ...)" do fim, se estiver embutido
-  const cleaned = raw.replace(/\( *retificad[^\)]*\)/i, "").trim();
-  return cleaned || p.id;
+  return raw.replace(/\( *retificad[^\)]*\)/i, "").trim() || p.id;
 }
 
-/** Calcula vN de forma robusta:
- *  1) Se revIndex existe -> vN = revIndex + 1.
- *  2) Senão, agrupa por baseId explícito (diffResumo.baseId) e ordena por upload -> retificadas recebem v1, v2, ...
- *  3) Se ainda faltar, agrupa por "nome-base" (mesma reunião) e ordena por upload -> retificadas recebem v1, v2, ...
- *  Obs.: pauta base NÃO recebe vN (fica sem sufixo).
- */
-async function computeVersionNumbers(
-  _db: any,
-  list: PautaDoc[]
-): Promise<Map<string, number>> {
+/** Calcula vN robusto */
+async function computeVersionNumbers(_db: any, list: PautaDoc[]): Promise<Map<string, number>> {
   const vmap = new Map<string, number>();
 
-  // 1) revIndex direto
-  for (const p of list) {
-    if (typeof p.revIndex === "number") vmap.set(p.id, p.revIndex + 1);
-  }
+  for (const p of list) if (typeof p.revIndex === "number") vmap.set(p.id, p.revIndex + 1);
 
-  // 2) Agrupamento por baseId
   const byBaseId: Record<string, PautaDoc[]> = {};
   for (const p of list) {
     const baseId = p?.diffResumo?.baseId ? String(p.diffResumo.baseId) : "";
     if (!baseId) continue;
     (byBaseId[baseId] = byBaseId[baseId] || []).push(p);
   }
-  for (const [baseId, arr] of Object.entries(byBaseId)) {
+  for (const [, arr] of Object.entries(byBaseId)) {
     const sorted = [...arr].sort((a, b) => uploadTs(a) - uploadTs(b));
-    // Tudo que NÃO é o documento base recebe vN sequencial (v1, v2, ...)
     let v = 1;
     for (const p of sorted) {
-      if (p.id === baseId) continue; // base sem sufixo
+      if (p.id === (p as any)?.diffResumo?.baseId) continue;
       if (!vmap.has(p.id)) vmap.set(p.id, v++);
     }
   }
 
-  // 3) Fallback por nome-base (mesma reunião)
   const byBaseName: Record<string, PautaDoc[]> = {};
-  for (const p of list) {
-    const key = baseNameForGrouping(p);
-    (byBaseName[key] = byBaseName[key] || []).push(p);
-  }
+  for (const p of list) (byBaseName[baseNameForGrouping(p)] = byBaseName[baseNameForGrouping(p)] || []).push(p);
   for (const arr of Object.values(byBaseName)) {
-    // Ordena cronologicamente (asc) para definir a sequência de versões
     const sorted = [...arr].sort((a, b) => uploadTs(a) - uploadTs(b));
-    // Assume o primeiro como base (sem sufixo); os seguintes são retificações v1, v2...
     let v = 1;
     for (let i = 1; i < sorted.length; i++) {
       const p = sorted[i];
       if (!vmap.has(p.id)) vmap.set(p.id, v++);
     }
   }
-
   return vmap;
-}
-
-/** (mantido) Busca pautas recentes com fallbacks — não usamos mais no seletor, mas mantive para compat. */
-async function fetchRecentPautasRobusto(db: any, max = 24): Promise<PautaDoc[]> {
-  const col = collection(db, "pautas");
-  try {
-    const snap = await getDocs(query(col, orderBy("meetingDate", "desc"), limit(max)));
-    const arr: PautaDoc[] = [];
-    snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
-    if (arr.length) return arr;
-  } catch {}
-  try {
-    const snap = await getDocs(query(col, orderBy("updatedAt", "desc"), limit(max)));
-    const arr: PautaDoc[] = [];
-    snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
-    if (arr.length) return arr;
-  } catch {}
-  try {
-    const snap = await getDocs(query(col, limit(max)));
-    const arr: PautaDoc[] = [];
-    snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
-    return arr;
-  } catch {
-    return [];
-  }
 }
 
 /* ==================== Auth ==================== */
 function useCurrentUser(): { loading: boolean; user: MiniUser } {
-  const [state, setState] = useState<{ loading: boolean; user: MiniUser }>({
-    loading: true,
-    user: null,
-  });
+  const [state, setState] = useState<{ loading: boolean; user: MiniUser }>({ loading: true, user: null });
   useEffect(() => {
     const unsub = onAuthStateChanged(getAuth(), (fb: FBUser | null) => {
       if (!fb) setState({ loading: false, user: null });
-      else
-        setState({
-          loading: false,
-          user: { uid: fb.uid, email: fb.email || undefined, nome: fb.displayName || undefined },
-        });
+      else setState({ loading: false, user: { uid: fb.uid, email: fb.email || undefined, nome: fb.displayName || undefined } });
     });
     return () => unsub();
   }, []);
   return state;
 }
 
-/* ==================== Firestore helpers (paralelas) ==================== */
+/* ==================== Firestore helpers ==================== */
 async function runQueriesUnionParallel(qs: Query<DocumentData>[]): Promise<Atribuicao[]> {
   const snaps = await Promise.allSettled(qs.map((qx) => getDocs(qx)));
   const map: Record<string, Atribuicao> = {};
@@ -452,11 +378,7 @@ async function fetchAtribuicoesDoUsuario(db: any, user: NonNullable<MiniUser>): 
 /* ==================== Busca da melhor análise anterior ==================== */
 const reaproveitoCache = new Map<string, string | null>(); // pleitoKey -> atribuiçãoId (ou null)
 
-async function findBestPriorAnalysisId(
-  db: any,
-  pleitoKey?: string,
-  excludePautaId?: string
-): Promise<string | null> {
+async function findBestPriorAnalysisId(db: any, pleitoKey?: string, excludePautaId?: string): Promise<string | null> {
   const k = (pleitoKey || "").trim();
   if (!k) return null;
 
@@ -476,22 +398,27 @@ async function findBestPriorAnalysisId(
     return null;
   }
 
+  const rank = (x: Atribuicao) => {
+    const st = normalizeStatus(x.status);
+    const temTexto =
+      !!(x?.analise?.resumo?.trim() || x?.analise?.comercio?.trim() || x?.analise?.tecnica?.trim() || x?.analise?.sugestao?.trim());
+    if (st === "concluido") return 2;
+    if (temTexto) return 1;
+    return 0; // vazio não serve para reaproveitar
+  };
+
   cand.sort((a, b) => {
-    const rank = (x: Atribuicao) => {
-      const st = normalizeStatus(x.status);
-      if (st === "concluido") return 2;
-      if (x?.analise?.resumo || x?.analise?.comercio || x?.analise?.tecnica || x?.analise?.sugestao)
-        return 1;
-      return 0;
-    };
     const r = rank(b) - rank(a);
     if (r !== 0) return r;
     return toMillis(b.updatedAt) - toMillis(a.updatedAt);
   });
 
-  const best = cand[0]?.id || null;
-  reaproveitoCache.set(k, best);
-  return best;
+  const best = cand[0];
+  const bestRank = best ? rank(best) : 0;
+  const result = best && bestRank > 0 ? best.id : null;
+
+  reaproveitoCache.set(k, result);
+  return result;
 }
 
 /* ==================== Componente ==================== */
@@ -504,22 +431,12 @@ function makePautaLabel(p: PautaDoc, versionMap?: Map<string, number>): string {
     renderStr(p.meeting, "") ||
     renderStr(p.slug, "");
 
-  const ts =
-    toMillis(p.meetingDate) ||
-    toMillis(p.updatedAt) ||
-    toMillis(p.createdAt);
+  const ts = toMillis(p.meetingDate) || toMillis(p.updatedAt) || toMillis(p.createdAt);
+  const mesAno = ts ? new Date(ts).toLocaleDateString("pt-BR", { month: "long", year: "numeric" }) : "";
 
-  const mesAno = ts
-    ? new Date(ts).toLocaleDateString("pt-BR", { month: "long", year: "numeric" })
-    : "";
-
-  const vN = versionMap?.get(p.id); // se existir no mapa, é retificação
-  const isRetByFlags =
-    !!(p?.diffResumo?.baseId || p?.isRetificadora) ||
-    /retificad/i.test(String(p.arquivo || ""));
-
+  const vN = versionMap?.get(p.id);
+  const isRetByFlags = !!(p?.diffResumo?.baseId || p?.isRetificadora) || /retificad/i.test(String(p.arquivo || ""));
   const prefix = baseTitle || (mesAno ? `Reunião do CAT — ${mesAno}` : p.id);
-  // Se está no mapa (tem vN) -> retificação com vN; Senão, se flags indicam retificação -> "(RETIFICADA)" sem número
   return `${prefix}${vN ? ` (RETIFICADA v${vN})` : isRetByFlags ? ` (RETIFICADA)` : ""}`;
 }
 
@@ -543,10 +460,8 @@ const MinhasTarefasPage: React.FC = () => {
     (async () => {
       setIsLoadingPautas(true);
       try {
-        // Carrega TODAS as pautas e ordena como o Histórico (mais recente -> mais antiga)
         let list = await fetchAllPautasOrdered(db);
 
-        // Fallback: se por algum motivo não veio nada, usa pautas do usuário
         if ((!list || list.length === 0) && user) {
           const mine = await fetchAtribuicoesDoUsuario(db, user);
           const ids = Array.from(new Set(mine.map((m) => m.pautaId).filter(Boolean))) as string[];
@@ -560,7 +475,6 @@ const MinhasTarefasPage: React.FC = () => {
         setPautas(list || []);
         if (!pautaId && list && list.length) setPautaId(list[0].id);
 
-        // >>> vN robusto (revIndex, baseId e fallback por nome-base)
         const vmap = await computeVersionNumbers(db, list || []);
         setVersionMap(vmap);
       } catch {
@@ -584,7 +498,6 @@ const MinhasTarefasPage: React.FC = () => {
         }
 
         const mine = await fetchAtribuicoesDoUsuario(db, user);
-
         const mineScoped = mine.filter((a) => (a.pautaId || "") === pautaId);
 
         const byScopedKey = new Map<string, Atribuicao>();
@@ -592,7 +505,6 @@ const MinhasTarefasPage: React.FC = () => {
           const ncm8 = onlyDigits(a.ncm).slice(0, 8);
           const produtoNk = normKey(a.produto || "");
           const scopedKey = `${norm(a.pautaId)}|${norm(a.pleitoKey) || `${ncm8}|${produtoNk}`}`;
-
           const prev = byScopedKey.get(scopedKey);
           if (!prev) byScopedKey.set(scopedKey, a);
           else {
@@ -609,7 +521,6 @@ const MinhasTarefasPage: React.FC = () => {
         }
         const merged = Array.from(byScopedKey.values());
 
-        // completar dados + sugerir “reaproveitar” para pleitos da pauta atual com análise anterior do usuário
         let pauta: PautaDoc | undefined;
         const need = merged.filter((l) => !(l.ncm && l.produto && l.tipoPleito && l.tituloSecao));
 
@@ -651,9 +562,7 @@ const MinhasTarefasPage: React.FC = () => {
           }
 
           const assignedKeys = new Set(merged.map((a) => String(a.pleitoKey || "")).filter(Boolean));
-          const myHistoricKeys = new Set(
-            mine.filter((a) => a.pleitoKey && a.pautaId !== pautaId).map((a) => String(a.pleitoKey))
-          );
+          const myHistoricKeys = new Set(mine.filter((a) => a.pleitoKey && a.pautaId !== pautaId).map((a) => String(a.pleitoKey)));
 
           for (const r of rows) {
             const k = String((r as any)?.key || (r as any)?.id || tryMakeKeyFromRow(r));
@@ -679,7 +588,7 @@ const MinhasTarefasPage: React.FC = () => {
           }
         }
 
-        // baseId correto (se retificada, usar o da base) para marcar "retirado"
+        // marca retirados respeitando base
         try {
           const sel = pauta ?? (await getPautasByIdsCached(db, [pautaId]))[pautaId];
           const baseIdForRetifs = sel?.diffResumo?.baseId || pautaId;
@@ -695,9 +604,7 @@ const MinhasTarefasPage: React.FC = () => {
           };
           for (const t of merged) {
             const k = keyFor(t);
-            if (baseIdForRetifs && k && removedByBase[String(baseIdForRetifs)]?.has(k)) {
-              t.__retirado = true;
-            }
+            if (baseIdForRetifs && k && removedByBase[String(baseIdForRetifs)]?.has(k)) t.__retirado = true;
           }
         } catch {}
 
@@ -745,21 +652,32 @@ const MinhasTarefasPage: React.FC = () => {
     [resumo]
   );
 
+  /** Monta a URL com seeds para criar/abrir a análise sempre em branco */
+  function buildOpenUrl(t: Atribuicao, opts?: { copyFrom?: string | null }) {
+    const atrId = t.id || makeAtribuicaoId(`${t.pautaId || pautaId}__${t.pleitoKey || ""}`);
+    const qs = new URLSearchParams();
+    qs.set("blank", "1");
+    qs.set("pautaId", t.pautaId || pautaId || "");
+    if (t.pleitoKey) qs.set("pleitoKey", t.pleitoKey);
+    if (t.ncm) qs.set("ncm", t.ncm);
+    if (t.produto) qs.set("produto", t.produto);
+    if (t.pleiteante) qs.set("pleiteante", t.pleiteante);
+    if (t.tituloSecao) qs.set("tituloSecao", t.tituloSecao);
+    if (t.tipoPleito) qs.set("tipoPleito", t.tipoPleito);
+    if (opts?.copyFrom) qs.set("copyFrom", opts.copyFrom);
+    return `/analise/${encodeURIComponent(atrId)}?${qs.toString()}`;
+  }
+
   const openAnalyse = (t: Atribuicao) => {
-    const atrId =
-      t.id || makeAtribuicaoId(`${t.pautaId || pautaId}__${t.pleitoKey || ""}`);
-    const url = `/analise/${encodeURIComponent(atrId)}`;
+    const url = buildOpenUrl(t); // sempre blank=1
     (document.activeElement as HTMLElement | null)?.blur?.();
     nav(url);
   };
 
   function onReaproveitar(t: Atribuicao) {
     const sourceId = priorMap[t.id] || null;
-    const atrId =
-      t.id || makeAtribuicaoId(`${t.pautaId || pautaId}__${t.pleitoKey || ""}`);
-    const url = sourceId
-      ? `/analise/${encodeURIComponent(atrId)}?copyFrom=${encodeURIComponent(sourceId)}`
-      : `/analise/${encodeURIComponent(atrId)}`;
+    if (!sourceId) return;
+    const url = buildOpenUrl(t, { copyFrom: sourceId }); // blank=1 + copyFrom
     (document.activeElement as HTMLElement | null)?.blur?.();
     nav(url);
   }
@@ -771,11 +689,7 @@ const MinhasTarefasPage: React.FC = () => {
       nao_iniciado: "bg-slate-50 border border-slate-200 text-slate-700",
       concluido: "bg-emerald-50 border border-emerald-200 text-emerald-800",
     };
-    const label: Record<string, string> = {
-      em_analise: "Em análise",
-      nao_iniciado: "Novo",
-      concluido: "Concluído",
-    };
+    const label: Record<string, string> = { em_analise: "Em análise", nao_iniciado: "Novo", concluido: "Concluído" };
     return (
       <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${map[n] || ""}`}>
         {label[n] || "—"}
@@ -800,19 +714,10 @@ const MinhasTarefasPage: React.FC = () => {
   );
 
   const pautaSelect = useMemo(() => {
-    if (isLoadingPautas) {
-      return <span className="text-sm text-gray-400">carregando pautas…</span>;
-    }
-    if (!pautas.length) {
-      return <span className="text-sm text-gray-400">nenhuma pauta encontrada ou sem permissão</span>;
-    }
+    if (isLoadingPautas) return <span className="text-sm text-gray-400">carregando pautas…</span>;
+    if (!pautas.length) return <span className="text-sm text-gray-400">nenhuma pauta encontrada ou sem permissão</span>;
     return (
-      <select
-        className="border rounded px-2 py-1"
-        value={pautaId}
-        onChange={(e) => setPautaId(e.target.value)}
-        aria-label="Selecionar pauta"
-      >
+      <select className="border rounded px-2 py-1" value={pautaId} onChange={(e) => setPautaId(e.target.value)} aria-label="Selecionar pauta">
         {pautas.map((p) => (
           <option key={p.id} value={p.id}>
             {makePautaLabel(p, versionMap)}
@@ -887,7 +792,7 @@ const MinhasTarefasPage: React.FC = () => {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                 {tarefas.map((t) => {
-                  const canReuse = !!(t.pleitoKey && priorMap[t.id]);
+                  const canReuse = !!priorMap[t.id]; // só mostra se há análise anterior válida
                   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
@@ -933,11 +838,7 @@ const MinhasTarefasPage: React.FC = () => {
                       </div>
 
                       <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100"
-                          onClick={() => openAnalyse(t)}
-                          aria-label="Abrir análise"
-                        >
+                        <button className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100" onClick={() => openAnalyse(t)} aria-label="Abrir análise">
                           Abrir
                         </button>
                         {canReuse && (
