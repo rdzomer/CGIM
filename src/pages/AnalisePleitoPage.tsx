@@ -32,7 +32,7 @@ type Atrib = {
   status?: string;
   analise?: Analise | null;
   pleitoKey?: string;
-  posDeliberacao?: PosDeliberacao | null; // << NOVO
+  posDeliberacao?: PosDeliberacao | null;
 };
 
 /* ---------------------------- Helpers ---------------------------- */
@@ -48,9 +48,7 @@ const shorten = (s?: string, n = SHORT_LIMIT) => {
   if (!t) return "—";
   return t.length > n ? t.slice(0, n).trimEnd() + "…" : t;
 };
-function onlyDigits(s?: string) {
-  return (s || "").replace(/\D+/g, "");
-}
+function onlyDigits(s?: string) { return (s || "").replace(/\D+/g, ""); }
 function friendlyLabel(k: string) {
   const map: Record<string, string> = {
     ncm: "NCM",
@@ -183,12 +181,14 @@ const AnalisePleitoPage: React.FC = () => {
   const location = useLocation();
   const params = new URLSearchParams(location.search);
   const copyFrom = params.get("copyFrom") || "";
+  const blank = params.get("blank") || "";
+  const isBlank = blank === "1" || blank.toLowerCase?.() === "true";
 
   const [atr, setAtr] = useState<Atrib | null>(null);
   const [ficha, setFicha] = useState<Record<string, string>>({});
   const [pedido, setPedido] = useState<PedidoInfo>({ _matchedKeys: [] });
   const [form, setForm] = useState<Analise>({});
-  const [pos, setPos] = useState<PosDeliberacao>({}); // << NOVO
+  const [pos, setPos] = useState<PosDeliberacao>({});
   const [salvando, setSalvando] = useState(false);
   const [carregando, setCarregando] = useState(true);
 
@@ -219,14 +219,14 @@ const AnalisePleitoPage: React.FC = () => {
           status: v?.status || "novo",
           analise: v?.analise || null,
           pleitoKey: v?.pleitoKey || "",
-          posDeliberacao: v?.posDeliberacao || null, // << ler se existir
+          posDeliberacao: v?.posDeliberacao || null,
         };
         setAtr(atrib);
-        setForm(atrib.analise || {});
+        setForm(isBlank ? {} : (atrib.analise || {}));  // << em branco quando ?blank=1
         setPos(atrib.posDeliberacao || {});
 
-        // carrega rascunho se copyFrom veio
-        if (copyFrom) {
+        // carrega rascunho se copyFrom veio e NÃO estiver em modo "blank"
+        if (copyFrom && !isBlank) {
           try {
             const fromSnap = await getDoc(doc(db, "atribuicoes", copyFrom));
             if (fromSnap.exists()) {
@@ -242,14 +242,14 @@ const AnalisePleitoPage: React.FC = () => {
           }
         }
 
-        // fallback do HISTÓRICO se não veio copyFrom e a análise atual está vazia
+        // fallback do HISTÓRICO se NÃO for blank e não veio copyFrom e análise atual está vazia
         try {
           const temAtual =
             !!((atrib?.analise?.resumo && atrib.analise.resumo.trim()) ||
                (atrib?.analise?.comercio && atrib.analise.comercio.trim()) ||
                (atrib?.analise?.tecnica && atrib.analise.tecnica.trim()) ||
                (atrib?.analise?.sugestao && atrib.analise.sugestao.trim()));
-          if (!copyFrom && !temAtual && (atrib?.pleitoKey || v?.pleitoKey)) {
+          if (!copyFrom && !isBlank && !temAtual && (atrib?.pleitoKey || v?.pleitoKey)) {
             const hist = await getHistoricoByPleitoKey(getFirestore(), (atrib?.pleitoKey || v?.pleitoKey)!);
             if (hist && (hist.ultimoResumo || hist.ultimoComercio || hist.ultimaTecnica || hist.ultimaSugestao)) {
               setDraft({
@@ -317,7 +317,7 @@ const AnalisePleitoPage: React.FC = () => {
         setCarregando(false);
       }
     })();
-  }, [atrId, navigate, copyFrom]);
+  }, [atrId, navigate, copyFrom, isBlank]);
 
   const fichaPairsFull = useMemo(() => Object.entries(ficha), [ficha]);
 
@@ -342,7 +342,6 @@ const AnalisePleitoPage: React.FC = () => {
           tecnica: form.tecnica || "",
           sugestao: form.sugestao || "",
         },
-        // inclui posDeliberacao no mesmo update (idempotente)
         posDeliberacao: {
           data: pos.data || "",
           resultado: pos.resultado || "",
@@ -356,7 +355,7 @@ const AnalisePleitoPage: React.FC = () => {
 
       await updateDoc(doc(db, "atribuicoes", atr.id), payload);
 
-      // upsert no histórico canônico por pleitoKey
+      // upsert no histórico por pleitoKey
       try {
         await upsertHistoricoFromAtribuicao(db, {
           id: atr.id,
@@ -373,9 +372,7 @@ const AnalisePleitoPage: React.FC = () => {
           },
           updatedAt: new Date(),
         } as any);
-      } catch {
-        /* não interrompe o fluxo do usuário */
-      }
+      } catch { /* não interrompe o fluxo */ }
 
       toast.success(statusForcado === "concluido" ? "Análise concluída." : "Análise salva.");
       if (statusForcado === "concluido") navigate("/");
@@ -412,7 +409,7 @@ const AnalisePleitoPage: React.FC = () => {
 
   return (
     <div className="p-2 md:p-4 lg:p-6 space-y-6">
-      {/* Banner de rascunho disponível */}
+      {/* Banner de rascunho disponível (não aparece quando ?blank=1) */}
       {draft && (
         <div className="rounded-xl border border-amber-300 bg-amber-50 text-amber-900 p-4 flex items-center justify-between gap-3">
           <div className="text-sm">
@@ -655,7 +652,7 @@ const AnalisePleitoPage: React.FC = () => {
         </div>
       </section>
 
-      {/* NOVO: Encaminhamento ao GECEX */}
+      {/* Encaminhamento ao GECEX */}
       <section className="rounded-2xl border bg-white shadow-sm">
         <header className="p-4 sm:p-5 border-b">
           <h2 className="text-base sm:text-lg font-semibold">Encaminhamento ao GECEX</h2>

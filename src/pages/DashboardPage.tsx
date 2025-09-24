@@ -363,9 +363,9 @@ const DashboardPage: React.FC = () => {
   };
 
   const openAnalyse = (pleitoKey: string, atr?: Atrib | null) => {
-    // SEM copyFrom — sempre “em branco” para a pauta atual
+    // SEM copyFrom — abre "nova" análise em branco (forçado por ?blank=1)
     const atrId = atr?.id || buildAtrIdForCurrentPauta(pleitoKey);
-    nav(`/analise/${encodeURIComponent(atrId)}`);
+    nav(`/analise/${encodeURIComponent(atrId)}?blank=1`);
   };
 
   const openAnalyseReuse = (pleitoKey: string, atr?: Atrib | null) => {
@@ -529,9 +529,9 @@ const DashboardPage: React.FC = () => {
                         <button
                           className="px-3 py-1 rounded border text-sm hover:bg-gray-50"
                           onClick={() => openAnalyse(it.pleitoKey, it._atr)}
-                          title="Abrir análise em branco da pauta atual"
+                          title="Abrir nova análise (em branco) para a pauta atual"
                         >
-                          Abrir análise
+                          Abrir nova análise
                         </button>
 
                         {priorId && (

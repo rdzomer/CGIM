@@ -112,6 +112,9 @@ const toMillis = (t: any): number => {
   return 0;
 };
 
+const uploadTs = (p: Partial<PautaDoc>) =>
+  toMillis(p.createdAt) || toMillis(p.updatedAt) || toMillis(p.meetingDate);
+
 const normalizeStatus = (s?: string) => {
   const v = (s || "").toLowerCase();
   if (/conclu[ií]d/.test(v)) return "concluido";
@@ -266,7 +269,87 @@ async function getRemovedKeysByBaseIds(db: any, baseIds: string[]): Promise<Reco
   return out;
 }
 
-/** Lista pautas recentes com fallbacks. */
+/** Lista TODAS as pautas e ordena por linha do tempo de upload (desc): createdAt > updatedAt > meetingDate. */
+async function fetchAllPautasOrdered(db: any): Promise<PautaDoc[]> {
+  try {
+    const snap = await getDocs(collection(db, "pautas"));
+    const arr: PautaDoc[] = [];
+    snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
+    arr.sort((a, b) => uploadTs(b) - uploadTs(a));
+    return arr;
+  } catch {
+    return [];
+  }
+}
+
+/** Nome-base (para agrupar versões) = title > reuniao > meeting > slug, removendo um sufixo "(RETIFICADA ...)" se já veio. */
+function baseNameForGrouping(p: PautaDoc): string {
+  const raw =
+    renderStr(p.title, "") ||
+    renderStr(p.reuniao, "") ||
+    renderStr(p.meeting, "") ||
+    renderStr(p.slug, "") ||
+    "";
+  // remove qualquer "(retificada ...)" do fim, se estiver embutido
+  const cleaned = raw.replace(/\( *retificad[^\)]*\)/i, "").trim();
+  return cleaned || p.id;
+}
+
+/** Calcula vN de forma robusta:
+ *  1) Se revIndex existe -> vN = revIndex + 1.
+ *  2) Senão, agrupa por baseId explícito (diffResumo.baseId) e ordena por upload -> retificadas recebem v1, v2, ...
+ *  3) Se ainda faltar, agrupa por "nome-base" (mesma reunião) e ordena por upload -> retificadas recebem v1, v2, ...
+ *  Obs.: pauta base NÃO recebe vN (fica sem sufixo).
+ */
+async function computeVersionNumbers(
+  _db: any,
+  list: PautaDoc[]
+): Promise<Map<string, number>> {
+  const vmap = new Map<string, number>();
+
+  // 1) revIndex direto
+  for (const p of list) {
+    if (typeof p.revIndex === "number") vmap.set(p.id, p.revIndex + 1);
+  }
+
+  // 2) Agrupamento por baseId
+  const byBaseId: Record<string, PautaDoc[]> = {};
+  for (const p of list) {
+    const baseId = p?.diffResumo?.baseId ? String(p.diffResumo.baseId) : "";
+    if (!baseId) continue;
+    (byBaseId[baseId] = byBaseId[baseId] || []).push(p);
+  }
+  for (const [baseId, arr] of Object.entries(byBaseId)) {
+    const sorted = [...arr].sort((a, b) => uploadTs(a) - uploadTs(b));
+    // Tudo que NÃO é o documento base recebe vN sequencial (v1, v2, ...)
+    let v = 1;
+    for (const p of sorted) {
+      if (p.id === baseId) continue; // base sem sufixo
+      if (!vmap.has(p.id)) vmap.set(p.id, v++);
+    }
+  }
+
+  // 3) Fallback por nome-base (mesma reunião)
+  const byBaseName: Record<string, PautaDoc[]> = {};
+  for (const p of list) {
+    const key = baseNameForGrouping(p);
+    (byBaseName[key] = byBaseName[key] || []).push(p);
+  }
+  for (const arr of Object.values(byBaseName)) {
+    // Ordena cronologicamente (asc) para definir a sequência de versões
+    const sorted = [...arr].sort((a, b) => uploadTs(a) - uploadTs(b));
+    // Assume o primeiro como base (sem sufixo); os seguintes são retificações v1, v2...
+    let v = 1;
+    for (let i = 1; i < sorted.length; i++) {
+      const p = sorted[i];
+      if (!vmap.has(p.id)) vmap.set(p.id, v++);
+    }
+  }
+
+  return vmap;
+}
+
+/** (mantido) Busca pautas recentes com fallbacks — não usamos mais no seletor, mas mantive para compat. */
 async function fetchRecentPautasRobusto(db: any, max = 24): Promise<PautaDoc[]> {
   const col = collection(db, "pautas");
   try {
@@ -289,37 +372,6 @@ async function fetchRecentPautasRobusto(db: any, max = 24): Promise<PautaDoc[]> 
   } catch {
     return [];
   }
-}
-
-/** Calcula vN (número da versão) para retificadoras */
-async function computeVersionNumbers(
-  db: any,
-  list: PautaDoc[]
-): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
-  for (const p of list) {
-    if (typeof p.revIndex === "number") out.set(p.id, p.revIndex + 1);
-  }
-  const baseIds = Array.from(
-    new Set(
-      list
-        .filter((p) => p?.diffResumo?.baseId && typeof p.revIndex !== "number")
-        .map((p) => String(p.diffResumo?.baseId))
-        .filter(Boolean)
-    )
-  );
-  for (const baseId of baseIds) {
-    try {
-      const snap = await getDocs(query(collection(db, "pautas"), where("diffResumo.baseId", "==", baseId)));
-      const arr = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as PautaDoc[];
-      arr.sort((a, b) => (toMillis(a.createdAt) || toMillis(a.updatedAt)) - (toMillis(b.createdAt) || toMillis(b.updatedAt)));
-      arr.forEach((p, i) => {
-        const vN = typeof p.revIndex === "number" ? p.revIndex + 1 : i + 2;
-        out.set(p.id, vN);
-      });
-    } catch { /* ignore */ }
-  }
-  return out;
 }
 
 /* ==================== Auth ==================== */
@@ -461,15 +513,14 @@ function makePautaLabel(p: PautaDoc, versionMap?: Map<string, number>): string {
     ? new Date(ts).toLocaleDateString("pt-BR", { month: "long", year: "numeric" })
     : "";
 
-  const isRet =
+  const vN = versionMap?.get(p.id); // se existir no mapa, é retificação
+  const isRetByFlags =
     !!(p?.diffResumo?.baseId || p?.isRetificadora) ||
-    /retificad/i.test(String(baseTitle)) ||
     /retificad/i.test(String(p.arquivo || ""));
 
-  const vN = versionMap?.get(p.id);
-
   const prefix = baseTitle || (mesAno ? `Reunião do CAT — ${mesAno}` : p.id);
-  return `${prefix}${isRet ? ` (RETIFICADA${vN ? ` v${vN}` : ""})` : ""}`;
+  // Se está no mapa (tem vN) -> retificação com vN; Senão, se flags indicam retificação -> "(RETIFICADA)" sem número
+  return `${prefix}${vN ? ` (RETIFICADA v${vN})` : isRetByFlags ? ` (RETIFICADA)` : ""}`;
 }
 
 const MinhasTarefasPage: React.FC = () => {
@@ -492,21 +543,24 @@ const MinhasTarefasPage: React.FC = () => {
     (async () => {
       setIsLoadingPautas(true);
       try {
-        let list = await fetchRecentPautasRobusto(db, 24);
+        // Carrega TODAS as pautas e ordena como o Histórico (mais recente -> mais antiga)
+        let list = await fetchAllPautasOrdered(db);
 
+        // Fallback: se por algum motivo não veio nada, usa pautas do usuário
         if ((!list || list.length === 0) && user) {
           const mine = await fetchAtribuicoesDoUsuario(db, user);
           const ids = Array.from(new Set(mine.map((m) => m.pautaId).filter(Boolean))) as string[];
           if (ids.length) {
             const map = await getPautasByIdsCached(db, ids);
             list = ids.map((id) => map[id]).filter(Boolean) as PautaDoc[];
-            list.sort((a, b) => toMillis(b.meetingDate) - toMillis(a.meetingDate));
+            list.sort((a, b) => uploadTs(b) - uploadTs(a));
           }
         }
 
         setPautas(list || []);
         if (!pautaId && list && list.length) setPautaId(list[0].id);
 
+        // >>> vN robusto (revIndex, baseId e fallback por nome-base)
         const vmap = await computeVersionNumbers(db, list || []);
         setVersionMap(vmap);
       } catch {
@@ -625,8 +679,11 @@ const MinhasTarefasPage: React.FC = () => {
           }
         }
 
+        // baseId correto (se retificada, usar o da base) para marcar "retirado"
         try {
-          const removedByBase = await getRemovedKeysByBaseIds(db, [pautaId]);
+          const sel = pauta ?? (await getPautasByIdsCached(db, [pautaId]))[pautaId];
+          const baseIdForRetifs = sel?.diffResumo?.baseId || pautaId;
+          const removedByBase = await getRemovedKeysByBaseIds(db, [String(baseIdForRetifs)]);
           const keyFor = (t: Atribuicao) => {
             const k = String(t.pleitoKey || "");
             if (k) return k;
@@ -637,9 +694,8 @@ const MinhasTarefasPage: React.FC = () => {
             return `${n8}|${normKey(t.produto || "")}|${normKey(t.pleiteante || "")}`;
           };
           for (const t of merged) {
-            const baseId = pautaId;
             const k = keyFor(t);
-            if (baseId && k && removedByBase[baseId]?.has(k)) {
+            if (baseIdForRetifs && k && removedByBase[String(baseIdForRetifs)]?.has(k)) {
               t.__retirado = true;
             }
           }

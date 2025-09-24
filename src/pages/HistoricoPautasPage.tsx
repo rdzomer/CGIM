@@ -16,9 +16,47 @@ type PautaItem = {
   novos?: number; alterados?: number; removidos?: number;
 };
 
+type RawPauta = {
+  id: string;
+  tituloArquivo: string;
+  baseName: string;        // label base (sem sufixos)
+  createdAtMs: number;
+  isRet: boolean;
+  baseId?: string;         // diffResumo.baseId quando existir
+  revIndex?: number;
+  secoes: number;
+  rows: PautaRow[];
+  cont?: { novos?: number; alterados?: number; removidos?: number };
+};
+
+const db = getFirestore();
+
 const norm = (s?: string) => (s ?? "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 const only8 = (s?: string) => (s ?? "").replace(/\D+/g, "").slice(0, 8);
 const safeStr = (v: any, fallback = "—") => (v == null ? fallback : (typeof v === "string" ? (v || fallback) : String(v)));
+
+const toMillis = (t: any): number => {
+  if (!t) return 0;
+  if (typeof t === "number") return t;
+  if (t instanceof Date) return t.getTime();
+  if (t?.toDate) return t.toDate().getTime?.() || 0;
+  if (t?.seconds) return t.seconds * 1000 + (t.nanoseconds || 0) / 1e6;
+  return 0;
+};
+
+const uploadTs = (p: any) => toMillis(p.createdAt) || toMillis(p.updatedAt) || toMillis(p.meetingDate);
+
+/** Remove qualquer sufixo "(RETIFICADA ...)" do nome base. */
+function baseNameFor(p: any): string {
+  const raw = norm(p?.title) || norm(p?.reuniao) || norm(p?.meeting) || norm(p?.slug) || "";
+  return (raw || p?.id || "").replace(/\( *retificad[^)]*\)/i, "").trim();
+}
+
+function meetingNumberFromBase(base: string): number {
+  // pega primeiro número (ex.: "65ª Reunião ..." -> 65)
+  const m = base.match(/(\d{1,3})/);
+  return m ? parseInt(m[1], 10) : -1;
+}
 
 function flattenRowsFromPauta(p: any): PautaRow[] {
   const out: PautaRow[] = [];
@@ -38,7 +76,8 @@ function flattenRowsFromPauta(p: any): PautaRow[] {
 function extractFields(row: PautaRow) {
   const keys = Object.keys(row || {});
   const by = (labels: string[]) => {
-    const hit = keys.find((k) => labels.some((l) => k.toLowerCase() === l.toLowerCase()) || labels.some((l) => k.toLowerCase().includes(l.toLowerCase()))) || "";
+    const hit = keys.find((k) => labels.some((l) => k.toLowerCase() === l.toLowerCase())) ||
+               keys.find((k) => labels.some((l) => k.toLowerCase().includes(l.toLowerCase()))) || "";
     return String(row?.[hit] ?? "");
   };
   const ncm = by(["NCM","Código NCM","Codigo NCM","Código","Codigo","NCM 8"]);
@@ -48,29 +87,134 @@ function extractFields(row: PautaRow) {
   return { ncm, produto, pleiteante, tipo };
 }
 
-const db = getFirestore();
-
-function toMillis(t: any): number {
-  if (!t) return 0;
-  if (typeof t === "number") return t;
-  if (t instanceof Date) return t.getTime();
-  if (t?.toDate) return t.toDate().getTime?.() || 0;
-  if (t?.seconds) return t.seconds * 1000 + (t.nanoseconds || 0) / 1e6;
-  return 0;
+function isRetFlag(p: any): boolean {
+  return !!(p?.diffResumo?.baseId || p?.isRetificadora) || /retificad/i.test(String(p?.arquivo || ""));
 }
 
-function pautaDisplay(p: any): string {
-  const title = norm(p?.title) || "";
-  const meeting = norm(p?.meeting) || "";
-  if (title) return title;
-  if (meeting) return meeting;
-  const ms = toMillis(p?.meetingDate || p?.createdAt);
-  if (ms) {
-    const d = new Date(ms);
-    const str = d.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
-    return `Reunião CAT — ${str[0].toUpperCase()}${str.slice(1)}`;
+async function buildRawList(): Promise<RawPauta[]> {
+  const snap = await getDocs(collection(db, "pautas"));
+  const arr: RawPauta[] = [];
+  snap.forEach((d) => {
+    const p = d.data() as any;
+    const base = baseNameFor(p) || d.id;
+    arr.push({
+      id: d.id,
+      tituloArquivo: safeStr(p?.arquivo, "—"),
+      baseName: base,
+      createdAtMs: uploadTs(p),
+      isRet: isRetFlag(p),
+      baseId: p?.diffResumo?.baseId ? String(p.diffResumo.baseId) : undefined,
+      revIndex: typeof p?.revIndex === "number" ? p.revIndex : undefined,
+      secoes: Array.isArray(p?.sections) ? p.sections.length : Array.isArray(p?.secoes) ? p.secoes.length : 0,
+      rows: flattenRowsFromPauta(p),
+      cont: p?.diffResumo?.contagens || p?.contagens || undefined,
+    });
+  });
+  return arr;
+}
+
+/** Calcula vN para retificadas:
+ * - Se revIndex está presente: vN = revIndex + 1 (v1 = base).
+ * - Senão, por grupo (baseId se existir; caso contrário, por baseName), ordena por createdAtMs asc
+ *   e numera as retificadas como v1, v2, ...
+ */
+function computeVersionMap(list: RawPauta[]): Map<string, number> {
+  const vmap = new Map<string, number>();
+  // 1) direto por revIndex
+  for (const r of list) if (typeof r.revIndex === "number") vmap.set(r.id, r.revIndex + 1);
+  // 2) por baseId explícito
+  const byBaseId: Record<string, RawPauta[]> = {};
+  for (const r of list) {
+    const baseId = r.baseId || "";
+    if (!baseId) continue;
+    (byBaseId[baseId] = byBaseId[baseId] || []).push(r);
   }
-  return p?.slug || p?.id || "—";
+  for (const [baseId, arr] of Object.entries(byBaseId)) {
+    const sorted = [...arr].sort((a,b)=>a.createdAtMs - b.createdAtMs);
+    let v = 1;
+    for (const r of sorted) {
+      if (r.id === baseId) continue; // base não recebe vN
+      if (!vmap.has(r.id)) vmap.set(r.id, v++);
+    }
+  }
+  // 3) fallback por baseName
+  const byBaseName: Record<string, RawPauta[]> = {};
+  for (const r of list) (byBaseName[r.baseName] = byBaseName[r.baseName] || []).push(r);
+  for (const arr of Object.values(byBaseName)) {
+    const sorted = [...arr].sort((a,b)=>a.createdAtMs - b.createdAtMs);
+    let v = 1;
+    for (let i=1;i<sorted.length;i++) {
+      const r = sorted[i];
+      if (!vmap.has(r.id)) vmap.set(r.id, v++);
+    }
+  }
+  return vmap;
+}
+
+/** Monta itens com contagens CGIM e aplica ordenação por reunião/versões. */
+async function buildItemsOrderedByMeeting(list: RawPauta[]): Promise<PautaItem[]> {
+  const versionMap = computeVersionMap(list);
+  // Pré-cálculo CGIM
+  let ncmSet = new Set<string>();
+  try { ncmSet = await getNcmSetCgim(); } catch { ncmSet = new Set(); }
+
+  // Agrupar por reunião (baseName)
+  type Group = { key: string; meetingNum: number; baseName: string; versions: RawPauta[]; };
+  const groups = new Map<string, Group>();
+  for (const r of list) {
+    // chave de grupo: baseId se existir; senão baseName
+    const key = r.baseId || r.baseName.toLowerCase();
+    const g = groups.get(key) || { key, meetingNum: meetingNumberFromBase(r.baseName), baseName: r.baseName, versions: [] };
+    g.baseName = g.baseName || r.baseName;
+    g.versions.push(r);
+    groups.set(key, g);
+  }
+
+  // Ordenar grupos pela numeração da reunião (ASC) e estabilidade por createdAt (ASC)
+  const orderedGroups = Array.from(groups.values()).sort((a,b)=>{
+    const n = (a.meetingNum - b.meetingNum);
+    if (n !== 0) return n;
+    // fallback: pela menor data entre as versões (asc)
+    const ta = Math.min(...a.versions.map(v=>v.createdAtMs||0));
+    const tb = Math.min(...b.versions.map(v=>v.createdAtMs||0));
+    return ta - tb;
+  });
+
+  // Para cada grupo: base primeiro, depois retificadas v1, v2...
+  const items: PautaItem[] = [];
+  for (const g of orderedGroups) {
+    const base = g.versions.find(v => !v.isRet) || g.versions.sort((a,b)=>a.createdAtMs-b.createdAtMs)[0];
+    const rets = g.versions.filter(v => v !== base).sort((a,b)=> (versionMap.get(a.id)||0) - (versionMap.get(b.id)||0));
+
+    const push = (r: RawPauta, isRet: boolean) => {
+      // CGIM count
+      let cgim = 0;
+      for (const row of r.rows) {
+        const flagged = row?.cgim === true || row?.isCGIM === true || row?.pertenceCGIM === true || row?.inCGIMScope === true;
+        if (flagged) { cgim++; continue; }
+        const n8 = only8(extractFields(row).ncm);
+        if (n8.length === 8 && ncmSet.has(n8)) cgim++;
+      }
+      const vN = versionMap.get(r.id);
+      const reuniao = isRet ? `${g.baseName}${vN ? ` (RETIFICADA v${vN})` : " (RETIFICADA)"}` : g.baseName;
+      items.push({
+        id: r.id,
+        tituloArquivo: r.tituloArquivo,
+        reuniao,
+        secoes: r.secoes,
+        pleitos: r.rows.length,
+        pleitosCgim: cgim,
+        novos: r.cont?.novos ?? 0,
+        alterados: r.cont?.alterados ?? 0,
+        removidos: r.cont?.removidos ?? 0,
+      });
+    };
+
+    if (base) push(base, false);
+    for (const r of rets) push(r, true);
+  }
+
+  return items;
 }
 
 const HistoricoPautasPage: React.FC = () => {
@@ -85,139 +229,42 @@ const HistoricoPautasPage: React.FC = () => {
       setCarregando(true);
       setErro("");
       try {
-        let ncmSet = new Set<string>();
-        try { ncmSet = await getNcmSetCgim(); } catch { ncmSet = new Set(); }
-
-        // --- carrega tudo ---
-        const snap = await getDocs(collection(db, "pautas"));
-        type RawP = {
-          id: string;
-          tituloArquivo: string;
-          reuniaoBase: string;
-          createdAtMs: number;
-          isRet: boolean;
-          baseId?: string;
-          revIndex?: number; // 0=base; 1=1ª retif (v2)...
-          secoes: number;
-          rows: PautaRow[];
-          cont?: { novos?: number; alterados?: number; removidos?: number };
-        };
-        const rawList: RawP[] = [];
-
-        for (const docSnap of snap.docs) {
-          const p: any = { id: docSnap.id, ...(docSnap.data() as any) };
-
-          const tituloArquivo = safeStr(p?.tituloArquivo) || safeStr(p?.fileName) || safeStr(p?.arquivo) || "—";
-          const reuniaoBase = pautaDisplay(p);
-
-          const createdAtMs = toMillis(p?.createdAt) || toMillis(p?.updatedAt);
-          const baseId = p?.diffResumo?.baseId || undefined;
-          const revIndex = typeof p?.revIndex === "number" ? p.revIndex : undefined;
-
-          const isRet = !!(baseId || p?.isRetificadora) ||
-                        /retificad/i.test(String(tituloArquivo)) ||
-                        /retificad/i.test(String(reuniaoBase));
-
-          const secoesArr = Array.isArray(p?.sections) ? p.sections : Array.isArray(p?.secoes) ? p.secoes : [];
-          const rows = flattenRowsFromPauta(p);
-
-          const cont = (p?.diffResumo && p.diffResumo.contagens) ? p.diffResumo.contagens : {
-            novos: (Array.isArray(p?.novos) ? p.novos.length : undefined),
-            removidos: (Array.isArray(p?.removidos) ? p.removidos.length : undefined),
-            alterados: undefined,
-          };
-
-          rawList.push({
-            id: p.id,
-            tituloArquivo,
-            reuniaoBase,
-            createdAtMs,
-            isRet,
-            baseId,
-            revIndex,
-            secoes: secoesArr.length,
-            rows,
-            cont,
-          });
-        }
-
-        // --- calcula vN por base, respeitando revIndex quando existir ---
-        const byBase: Record<string, RawP[]> = {};
-        rawList.forEach((r) => {
-          if (r.baseId) {
-            (byBase[r.baseId] = byBase[r.baseId] || []).push(r);
-          }
-        });
-        const versionMap = new Map<string, number>(); // pautaId -> vN (2,3,...)
-        Object.entries(byBase).forEach(([, arr]) => {
-          // ordena por createdAt asc para inferir ordem das retificações
-          arr.sort((a, b) => (a.createdAtMs || 0) - (b.createdAtMs || 0));
-          arr.forEach((r, i) => {
-            if (typeof r.revIndex === "number") {
-              versionMap.set(r.id, r.revIndex + 1); // 1 => v2
-            } else {
-              versionMap.set(r.id, i + 2); // primeira retificação => v2
-            }
-          });
-        });
-
-        // --- computa métricas CGIM e monta lista final ---
-        const list: PautaItem[] = rawList.map((r) => {
-          let cgim = 0;
-          for (const row of r.rows) {
-            const flagged = row?.cgim === true || row?.isCGIM === true || row?.pertenceCGIM === true || row?.inCGIMScope === true;
-            if (flagged) { cgim++; continue; }
-            const n8 = only8(extractFields(row).ncm);
-            if (n8.length === 8 && ncmSet.has(n8)) cgim++;
-          }
-          const vN = versionMap.get(r.id);
-          const reuniao = r.isRet ? `${r.reuniaoBase}${vN ? ` (RETIFICADA v${vN})` : " (RETIFICADA)"}` : r.reuniaoBase;
-
-          return {
-            id: r.id,
-            tituloArquivo: r.tituloArquivo,
-            reuniao,
-            secoes: r.secoes,
-            pleitos: r.rows.length,
-            pleitosCgim: cgim,
-            novos: r.cont?.novos ?? 0,
-            alterados: r.cont?.alterados ?? 0,
-            removidos: r.cont?.removidos ?? 0,
-          };
-        });
-
-        // mantém ordenação atual (sem mexer no seu UX)
+        const raw = await buildRawList();
+        const list = await buildItemsOrderedByMeeting(raw);
         setItens(list);
       } catch (e: any) {
         console.error(e);
         setErro(e?.message || "Falha ao carregar histórico.");
-      } finally { setCarregando(false); }
+      } finally {
+        setCarregando(false);
+      }
     })();
   }, []);
 
-  const total = useMemo(() => itens.length, [itens]);
-
   const excluir = async (id: string) => {
+    if (!id) return;
     if (!confirm("Tem certeza que deseja excluir esta pauta?")) return;
-    await deleteDoc(doc(db, "pautas", id));
-    setItens((prev) => prev.filter((x) => x.id !== id));
+    try {
+      await deleteDoc(doc(db, "pautas", id));
+      setItens((cur) => cur.filter((x) => x.id !== id));
+    } catch (e) {
+      alert("Falha ao excluir.");
+    }
   };
 
   return (
-    <div className="p-4 md:p-6 lg:p-8 space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Histórico de Pautas</h1>
-          <div className="text-sm text-slate-600 mt-1">{total} itens</div>
-        </div>
+    <div className="p-6 space-y-6">
+      <div>
+        <h1 className="text-2xl font-semibold">Histórico de Pautas</h1>
+        <p className="text-sm text-slate-600">{itens.length} itens</p>
       </div>
 
-      {erro && <div className="p-4 rounded-xl border bg-red-50 text-red-800">{erro}</div>}
+      {erro && <div className="p-3 rounded-xl border bg-red-50 text-red-700">{erro}</div>}
 
-      <div className="rounded-2xl border bg-white shadow-sm overflow-x-auto">
+      <div className="rounded-2xl border bg-white/70 overflow-auto">
         <table className="min-w-full text-sm">
           <thead>
-            <tr className="text-left text-slate-600">
+            <tr className="text-left bg-gray-50">
               <th className="p-3 font-medium">Reunião</th>
               <th className="p-3 font-medium">Arquivo</th>
               <th className="p-3 font-medium">Seções</th>
@@ -248,10 +295,10 @@ const HistoricoPautasPage: React.FC = () => {
                 <td className="p-3">{it.removidos ?? "—"}</td>
                 <td className="p-3">
                   <div className="flex gap-2">
-                    <button className="px-3 py-1 rounded border text-sm hover:bg-gray-50" onClick={() => nav(`/pauta?id=${encodeURIComponent(it.id)}`)}>
+                    <button className="px-3 py-1 rounded border hover:bg-gray-50" onClick={() => nav(`/pauta?id=${encodeURIComponent(it.id)}`)}>
                       Abrir
                     </button>
-                    <button className="px-3 py-1 rounded border text-sm hover:bg-red-50 text-red-700 border-red-300" onClick={() => excluir(it.id)}>
+                    <button className="px-3 py-1 rounded border bg-red-50 text-red-700 border-red-300" onClick={() => excluir(it.id)}>
                       excluir
                     </button>
                   </div>
