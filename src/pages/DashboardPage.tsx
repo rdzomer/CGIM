@@ -5,10 +5,6 @@ import {
   getFirestore,
   collection,
   getDocs,
-  query,
-  where,
-  DocumentData,
-  Query,
 } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, User as FBUser } from "firebase/auth";
 import {
@@ -20,7 +16,7 @@ import {
   Legend as ReLegend,
 } from "recharts";
 import { getNcmSetCgim } from "../services/ncmsService";
-import { makeAtribuicaoId, gerarPleitoKey } from "../services/atribuicoesService";
+import { gerarPleitoKey } from "../services/atribuicoesService";
 
 /* ==================== Tipos ==================== */
 type MiniUser = { uid?: string; email?: string; nome?: string } | null;
@@ -142,46 +138,6 @@ function rowStyleByStatus(statusRaw?: string) {
   return "bg-white border-l-4 border-l-gray-200";
 }
 
-/* ========== Melhor análise anterior (batelada por 'in' em chunks de 10) ========== */
-async function findBestPriorAnalysisBatch(
-  db: any,
-  keys: string[],
-  excludePautaId: string
-): Promise<Record<string, string | null>> {
-  const col = collection(db, "atribuicoes");
-  const out: Record<string, string | null> = {};
-  const uniq = Array.from(new Set(keys.filter(Boolean)));
-  const CHUNK = 10;
-  for (let i = 0; i < uniq.length; i += CHUNK) {
-    const slice = uniq.slice(i, i + CHUNK);
-    const snap = await getDocs(query(col, where("pleitoKey", "in", slice)));
-    const group: Record<string, Atrib[]> = {};
-    snap.forEach((d) => {
-      const a = { id: d.id, ...(d.data() as any) } as Atrib;
-      if (a.pautaId === excludePautaId) return;
-      const k = (a.pleitoKey || "").trim();
-      if (!k) return;
-      (group[k] = group[k] || []).push(a);
-    });
-    Object.entries(group).forEach(([k, arr]) => {
-      arr.sort((a, b) => {
-        const rank = (x: Atrib) => {
-          const st = normalizeStatus(x.status);
-          if (st === "concluido") return 2;
-          if (x?.analise?.resumo || x?.analise?.comercio || x?.analise?.tecnica || x?.analise?.sugestao) return 1;
-          return 0;
-        };
-        const r = rank(b) - rank(a);
-        if (r !== 0) return r;
-        return toMillis(b.updatedAt) - toMillis(a.updatedAt);
-      });
-      out[k] = arr[0]?.id || null;
-    });
-  }
-  uniq.forEach((k) => { if (!(k in out)) out[k] = null; });
-  return out;
-}
-
 /* ==================== Auth ==================== */
 function useCurrentUser(): { loading: boolean; user: MiniUser } {
   const [state, setState] = useState<{ loading: boolean; user: MiniUser }>({ loading: true, user: null });
@@ -214,7 +170,6 @@ const DashboardPage: React.FC = () => {
 
   const [pleitos, setPleitos] = useState<PleitoBase[]>([]);
   const [atribs, setAtribs] = useState<Atrib[]>([]);
-  const [priorMap, setPriorMap] = useState<Record<string, string | null>>({}); // pleitoKey -> atribId anterior
 
   useEffect(() => {
     if (authLoading) return;
@@ -238,7 +193,7 @@ const DashboardPage: React.FC = () => {
         });
         const pauta = pautasAll[0] || null;
         if (!pauta) {
-          setPleitos([]); setAtribs([]); setPriorMap({}); setPautaAtualId(""); setPautaAtualTitulo("");
+          setPleitos([]); setAtribs([]); setPautaAtualId(""); setPautaAtualTitulo("");
           setCarregando(false);
           return;
         }
@@ -257,7 +212,6 @@ const DashboardPage: React.FC = () => {
           rows.forEach((r: any) => {
             const { ncm, produto, pleiteante, tipo } = projectLinha(r);
             const n8 = onlyDigits(ncm).slice(0, 8);
-            // aceita sem set de NCM? então exibe tudo
             if (hasNcm && n8.length !== 8) return;
             if (hasNcm && !ncmSet.has(n8)) return;
 
@@ -277,34 +231,13 @@ const DashboardPage: React.FC = () => {
           });
         });
 
-        // 4) Atribuições (com filtro de analista, sem perder nada)
-        let atribsAll: Atrib[] = [];
-        if (analistaFiltro === "Todos") {
-          const s = await getDocs(collection(db, "atribuicoes"));
-          atribsAll = s.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-        } else {
-          const col = collection(db, "atribuicoes");
-          const qs: Query<DocumentData>[] = [
-            query(col, where("analistaNome", "==", analistaFiltro)),
-            query(col, where("atribuido.nome", "==", analistaFiltro)),
-            query(col, where("responsavelNome", "==", analistaFiltro)),
-          ];
-          const results = await Promise.all(qs.map((q) => getDocs(q)));
-          const tmp: Atrib[] = [];
-          results.forEach((snap) => snap.forEach((d) => tmp.push({ id: d.id, ...(d.data() as any) })));
-          const uniqA = new Map<string, Atrib>(); tmp.forEach((a) => uniqA.set(a.id, a));
-          atribsAll = Array.from(uniqA.values());
-        }
+        // 4) Atribuições (ultimo estado por pleito)
+        const s = await getDocs(collection(db, "atribuicoes"));
+        const atribsAll: Atrib[] = s.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
         atribsAll.sort((a, b) => toMillis(b.updatedAt) - toMillis(a.updatedAt));
 
         setPleitos(all);
         setAtribs(atribsAll);
-
-        // 5) Para cada pleito da pauta ATUAL, descobre a melhor análise anterior (exclui a própria pauta)
-        const keys = all.map((p) => p.pleitoKey);
-        const prior = await findBestPriorAnalysisBatch(db, keys, pauta.id);
-        setPriorMap(prior);
-
       } catch (e: any) {
         console.error(e);
         setErro(e?.message || "Falha ao carregar dados do Dashboard.");
@@ -312,7 +245,7 @@ const DashboardPage: React.FC = () => {
         setCarregando(false);
       }
     })();
-  }, [authLoading, analistaFiltro, db]);
+  }, [authLoading, db]);
 
   /* ==================== JOIN + filtros ==================== */
   const itens = useMemo(() => {
@@ -356,32 +289,11 @@ const DashboardPage: React.FC = () => {
   );
   const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"];
 
-  /* ==================== Navegação ==================== */
-  const buildAtrIdForCurrentPauta = (pleitoKey: string) => {
-    // escopo por pauta para garantir análise em branco da pauta atual
-    return makeAtribuicaoId(`${pautaAtualId}__${pleitoKey}`);
+  /* ==================== Navegação (somente leitura) ==================== */
+  const openViewAnalyse = (atr: Atrib) => {
+    // Abre a análise existente em modo somente leitura
+    nav(`/analise/${encodeURIComponent(atr.id)}?readonly=1`);
   };
-
-  const openAnalyse = (pleitoKey: string, atr?: Atrib | null) => {
-    // SEM copyFrom — abre "nova" análise em branco (forçado por ?blank=1)
-    const atrId = atr?.id || buildAtrIdForCurrentPauta(pleitoKey);
-    nav(`/analise/${encodeURIComponent(atrId)}?blank=1`);
-  };
-
-  const openAnalyseReuse = (pleitoKey: string, atr?: Atrib | null) => {
-    // COM copyFrom — reaproveita a melhor análise anterior
-    const priorId = priorMap[pleitoKey] || "";
-    const atrId = atr?.id || buildAtrIdForCurrentPauta(pleitoKey);
-    const url = priorId
-      ? `/analise/${encodeURIComponent(atrId)}?copyFrom=${encodeURIComponent(priorId)}`
-      : `/analise/${encodeURIComponent(atrId)}`;
-    nav(url);
-  };
-
-  const reaproveitaveisCount = useMemo(
-    () => Object.values(priorMap).filter(Boolean).length,
-    [priorMap]
-  );
 
   /* ==================== Render ==================== */
   return (
@@ -456,31 +368,16 @@ const DashboardPage: React.FC = () => {
             <div className="text-sm text-gray-500">Concluído</div>
             <div className="text-3xl font-semibold">{resumo.concluido}</div>
           </div>
-          {/* Com análise anterior (nesta pauta) */}
+          {/* Atalho para Minhas Tarefas */}
           <div className="p-4 border rounded-xl bg-white/70">
-            <div className="text-sm text-gray-500">Com análise anterior</div>
-            <div className="text-3xl font-semibold">{reaproveitaveisCount}</div>
+            <div className="text-sm text-gray-500">Atribuições</div>
             <button
-              className="mt-3 px-3 py-1.5 rounded border text-sm hover:bg-gray-50"
+              className="mt-2 px-3 py-1.5 rounded border text-sm hover:bg-gray-50"
               onClick={() => nav("/minhas-tarefas")}
               title="Abrir Minhas Tarefas"
             >
               Ver Minhas Tarefas
             </button>
-          </div>
-        </div>
-
-        <div className="border rounded-xl bg-white/70 p-4">
-          <div className="h-60">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={60} outerRadius={100} stroke="#fff" strokeWidth={1}>
-                  {pieData.map((_, index) => <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} />)}
-                </Pie>
-                <ReTooltip />
-                <ReLegend />
-              </PieChart>
-            </ResponsiveContainer>
           </div>
         </div>
 
@@ -495,7 +392,7 @@ const DashboardPage: React.FC = () => {
                 <th className="p-3 font-medium">Tipo de Pleito</th>
                 <th className="p-3 font-medium">Status</th>
                 <th className="p-3 font-medium">Sugestão</th>
-                <th className="p-3 font-medium">Ações</th>
+                <th className="p-3 font-medium">Análise</th>
               </tr>
             </thead>
             <tbody>
@@ -504,7 +401,7 @@ const DashboardPage: React.FC = () => {
               {!carregando && itens.map((it) => {
                 const showSug = !!it.sugestao;
                 const rowCls = rowStyleByStatus(it.status);
-                const priorId = priorMap[it.pleitoKey] || null;
+                const atr = it._atr as Atrib | null;
 
                 return (
                   <tr key={it.pleitoKey} className={`border-t align-top ${rowCls}`}>
@@ -525,25 +422,17 @@ const DashboardPage: React.FC = () => {
                       ) : <span className="text-gray-400">—</span>}
                     </td>
                     <td className="p-3">
-                      <div className="flex flex-col gap-2">
+                      {atr ? (
                         <button
                           className="px-3 py-1 rounded border text-sm hover:bg-gray-50"
-                          onClick={() => openAnalyse(it.pleitoKey, it._atr)}
-                          title="Abrir nova análise (em branco) para a pauta atual"
+                          onClick={() => openViewAnalyse(atr)}
+                          title="Visualizar análise (somente leitura)"
                         >
-                          Abrir nova análise
+                          Ver análise
                         </button>
-
-                        {priorId && (
-                          <button
-                            className="px-3 py-1 rounded border text-sm hover:bg-gray-50"
-                            onClick={() => openAnalyseReuse(it.pleitoKey, it._atr)}
-                            title="Há análise anterior — clique para reaproveitar"
-                          >
-                            Reaproveitar análise
-                          </button>
-                        )}
-                      </div>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
                     </td>
                   </tr>
                 );
