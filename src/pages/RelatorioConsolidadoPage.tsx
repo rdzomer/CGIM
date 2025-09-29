@@ -105,17 +105,15 @@ type PautaOption = {
   id: string;
   meeting: string;
   titulo: string;
-  // extras p/ rotular retificações
   isRet: boolean;
   baseKey: string;
   createdAtMs: number;
-  versaoRet?: number; // 1,2,3...
+  versaoRet?: number;
 };
 
 /** ===================== Helpers de pauta ===================== */
 function retBaseKey(meeting?: string) {
   const s = norm(meeting);
-  // remove “(RETIFICADA)” e variantes
   return s.replace(/\(retificad[ao](?:[^)]*)?\)/gi, "").replace(/\s+/g, " ").trim();
 }
 
@@ -319,7 +317,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     })();
   }, [pautaSel, db]);
 
-  // Carrega atribuições da pauta, com fallback por pleitoKey caso necessário
+  // Carrega atribuições da pauta e complementa por pleitoKey (sempre)
   useEffect(() => {
     if (!pautaSel) return;
     (async () => {
@@ -328,26 +326,39 @@ const RelatorioConsolidadoPage: React.FC = () => {
         const col = collection(db, "atribuicoes");
         const arr: Atribuicao[] = [];
 
-        // 1) por pautaId
+        // 1) atribuições desta pauta
         const snap1 = await getDocs(query(col, where("pautaId", "==", pautaSel)));
         snap1.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
 
-        // 2) fallback por chaves da pauta (docs legados sem pautaId)
-        if (arr.length === 0 && pautaDoc) {
+        // 2) SEMPRE completar por pleitoKey das linhas da pauta
+        if (pautaDoc) {
+          const rows = flattenPauta(pautaDoc);
           const keysSet = new Set<string>();
-          for (const { row } of flattenPauta(pautaDoc)) {
+          for (const { row } of rows) {
             const k = gerarPleitoKeyFromRow(row);
-            if (k) keysSet.add(k);
+            if (k) keysSet.add(norm(k));
           }
-          const keys = Array.from(keysSet);
-          for (let i = 0; i < keys.length; i += 10) {
-            const chunk = keys.slice(i, i + 10);
+
+          const jaTem = new Set<string>(
+            arr.map((a) => norm(String(a.pleitoKey || ""))).filter(Boolean)
+          );
+
+          const missing = Array.from(keysSet).filter((k) => k && !jaTem.has(k));
+
+          // Firestore IN aceita até 10
+          for (let i = 0; i < missing.length; i += 10) {
+            const chunk = missing.slice(i, i + 10);
             const snap2 = await getDocs(query(col, where("pleitoKey", "in", chunk)));
             snap2.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
           }
         }
 
-        const ajustados = arr.map((a) => {
+        // dedupe por id
+        const dedupMap = new Map<string, Atribuicao>();
+        for (const a of arr) dedupMap.set(a.id, a);
+        const dedup = Array.from(dedupMap.values());
+
+        const ajustados = dedup.map((a) => {
           const analise = a.analise ?? analiseFromLegacy(a);
           const status = normalizeStatus(a.status);
           return { ...a, analise, status };
@@ -360,11 +371,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     })().catch(console.error);
   }, [pautaSel, pautaDoc, db]);
 
-  /** Monta itens finais seguindo a ordem da pauta.
-   * Inclui somente ATRIBUIÇÕES:
-   * - status concluído
-   * - com Análise Técnica e/ou Sugestão CGIM preenchidas
-   */
+  /** Monta itens finais seguindo a ordem da pauta. */
   const itensBase: ItemRelatorio[] = useMemo(() => {
     if (!pautaDoc) return [];
 
@@ -373,14 +380,18 @@ const RelatorioConsolidadoPage: React.FC = () => {
     let i = 1;
 
     const byKey = new Map<string, Atribuicao>();
-    const byPair = new Map<string, Atribuicao>(); // ncm|produto
+    const byPair = new Map<string, Atribuicao>();   // ncm|produto
+    const byPair2 = new Map<string, Atribuicao>();  // ncm|pleiteante
 
     for (const a of atribuicoes) {
       const ncm8 = only8(a.ncm);
       const prod = normKey(a.produto);
+      const pl = normKey(a.pleiteante || "");
       const pair = `${ncm8}|${prod}`;
+      const pair2 = `${ncm8}|${pl}`;
       if (a.pleitoKey) byKey.set(norm(a.pleitoKey), a);
       if (ncm8 && prod) byPair.set(pair, a);
+      if (ncm8 && pl) byPair2.set(pair2, a);
     }
 
     const isOk = (a: Atribuicao | undefined) =>
@@ -391,7 +402,11 @@ const RelatorioConsolidadoPage: React.FC = () => {
       const key = gerarPleitoKeyFromRow(row);
       let a: Atribuicao | undefined = undefined;
 
-      a = byKey.get(norm(key)) || byPair.get(`${only8(ncm)}|${normKey(produto)}`);
+      a =
+        byKey.get(norm(key)) ||
+        byPair.get(`${only8(ncm)}|${normKey(produto)}`) ||
+        byPair2.get(`${only8(ncm)}|${normKey(pleiteante)}`);
+
       if (!isOk(a)) continue;
 
       const info: Record<string, string> = {};
@@ -640,7 +655,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
   return (
     <div className="p-4 md:p-8 w-full">
-      {/* Cabeçalho em uma coluna */}
       <div className="mb-4">
         <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Relatório Consolidado</h1>
         <p className="text-sm text-slate-600 mt-1">
@@ -648,7 +662,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
         </p>
       </div>
 
-      {/* Barra de ações */}
       <div className="mb-6 flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
@@ -705,7 +718,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
       {!loading && (
         <div className="space-y-4">
-          {/* Cards — SOMENTE Técnica + Sugestão */}
           {itensTS.map((it) => (
             <div key={it.atribId || it.indice} className="rounded-xl border bg-white p-4">
               <div className="flex items-center justify-between">
