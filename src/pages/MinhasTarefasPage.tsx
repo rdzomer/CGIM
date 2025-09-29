@@ -652,11 +652,16 @@ const MinhasTarefasPage: React.FC = () => {
     [resumo]
   );
 
-  /** Monta a URL com seeds para criar/abrir a análise sempre em branco */
+  /** Monta a URL para abrir a análise.
+   * Importante: NÃO usar `blank=1` no fluxo normal, para não apagar conteúdo já salvo.
+   * Usar `blank=1` apenas quando houver reaproveitamento (copyFrom) ou quando o card for extra de reaproveitar. */
   function buildOpenUrl(t: Atribuicao, opts?: { copyFrom?: string | null }) {
     const atrId = t.id || makeAtribuicaoId(`${t.pautaId || pautaId}__${t.pleitoKey || ""}`);
     const qs = new URLSearchParams();
-    qs.set("blank", "1");
+    // Usar blank=1 somente quando for reaproveitar ou quando o card foi criado como extra:
+    const shouldBlank = !!opts?.copyFrom || !!t.__extraReaproveitar;
+    if (shouldBlank) qs.set("blank", "1");
+
     qs.set("pautaId", t.pautaId || pautaId || "");
     if (t.pleitoKey) qs.set("pleitoKey", t.pleitoKey);
     if (t.ncm) qs.set("ncm", t.ncm);
@@ -669,7 +674,7 @@ const MinhasTarefasPage: React.FC = () => {
   }
 
   const openAnalyse = (t: Atribuicao) => {
-    const url = buildOpenUrl(t); // sempre blank=1
+    const url = buildOpenUrl(t); // agora abre preservando conteúdo salvo
     (document.activeElement as HTMLElement | null)?.blur?.();
     nav(url);
   };
@@ -677,7 +682,7 @@ const MinhasTarefasPage: React.FC = () => {
   function onReaproveitar(t: Atribuicao) {
     const sourceId = priorMap[t.id] || null;
     if (!sourceId) return;
-    const url = buildOpenUrl(t, { copyFrom: sourceId }); // blank=1 + copyFrom
+    const url = buildOpenUrl(t, { copyFrom: sourceId }); // blank=1 apenas aqui
     (document.activeElement as HTMLElement | null)?.blur?.();
     nav(url);
   }
