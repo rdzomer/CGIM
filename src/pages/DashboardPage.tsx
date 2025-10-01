@@ -16,7 +16,7 @@ import {
   Legend as ReLegend,
 } from "recharts";
 import { getNcmSetCgim } from "../services/ncmsService";
-import { gerarPleitoKey } from "../services/atribuicoesService";
+import { gerarPleitoKey, carregarAtribuicoesPorChaves } from "../services/atribuicoesService";
 
 /* ==================== Tipos ==================== */
 type MiniUser = { uid?: string; email?: string; nome?: string } | null;
@@ -138,6 +138,39 @@ function rowStyleByStatus(statusRaw?: string) {
   return "bg-white border-l-4 border-l-gray-200";
 }
 
+/* ========= flatten de pleitos (cobre rows, tabelas/tables/pleitos na seção e no topo) ========= */
+function flattenPleitosFromPauta(pauta: any) {
+  const out: (PleitoRow & { __sec?: string })[] = [];
+  const secoes = Array.isArray(pauta?.sections) ? pauta.sections : Array.isArray(pauta?.secoes) ? pauta.secoes : [];
+  for (const sec of secoes) {
+    const secTitle = String(sec?.title ?? sec?.titulo ?? "");
+    if (Array.isArray(sec?.rows)) sec.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+    if (Array.isArray(sec?.tabelas)) {
+      sec.tabelas.forEach((tb: any) => {
+        if (Array.isArray(tb?.rows)) tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+      });
+    }
+    if (Array.isArray(sec?.tables)) {
+      sec.tables.forEach((tb: any) => {
+        if (Array.isArray(tb?.rows)) tb.rows.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+      });
+    }
+    if (Array.isArray(sec?.pleitos)) sec.pleitos.forEach((r: any) => out.push({ ...r, __sec: secTitle }));
+  }
+  if (Array.isArray(pauta?.tabelas)) {
+    pauta.tabelas.forEach((tb: any) => {
+      if (Array.isArray(tb?.rows)) tb.rows.forEach((r: any) => out.push({ ...r, __sec: "" }));
+    });
+  }
+  if (Array.isArray(pauta?.tables)) {
+    pauta.tables.forEach((tb: any) => {
+      if (Array.isArray(tb?.rows)) tb.rows.forEach((r: any) => out.push({ ...r, __sec: "" }));
+    });
+  }
+  if (Array.isArray(pauta?.pleitos)) pauta.pleitos.forEach((r: any) => out.push({ ...r, __sec: "" }));
+  return out;
+}
+
 /* ==================== Auth ==================== */
 function useCurrentUser(): { loading: boolean; user: MiniUser } {
   const [state, setState] = useState<{ loading: boolean; user: MiniUser }>({ loading: true, user: null });
@@ -161,6 +194,7 @@ const DashboardPage: React.FC = () => {
   const [erro, setErro] = useState("");
   const [avisoNcm, setAvisoNcm] = useState("");
 
+  // >>> filtro deve iniciar SEMPRE em "Todos"
   const [analistaFiltro, setAnalistaFiltro] = useState<typeof ANALISTAS_FIXOS[number]>("Todos");
   const [statusFiltro, setStatusFiltro] = useState<typeof STATUS_OPCOES[number]>("Todos");
   const [somenteConcluidos, setSomenteConcluidos] = useState(false);
@@ -170,6 +204,8 @@ const DashboardPage: React.FC = () => {
 
   const [pleitos, setPleitos] = useState<PleitoBase[]>([]);
   const [atribs, setAtribs] = useState<Atrib[]>([]);
+  // >>> mapa oficial vindo da Pauta CAT: pleitoKey -> responsavelNome
+  const [respPorChave, setRespPorChave] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (authLoading) return;
@@ -193,7 +229,8 @@ const DashboardPage: React.FC = () => {
         });
         const pauta = pautasAll[0] || null;
         if (!pauta) {
-          setPleitos([]); setAtribs([]); setPautaAtualId(""); setPautaAtualTitulo("");
+          setPleitos([]); setAtribs([]); setRespPorChave({});
+          setPautaAtualId(""); setPautaAtualTitulo("");
           setCarregando(false);
           return;
         }
@@ -201,43 +238,46 @@ const DashboardPage: React.FC = () => {
         setPautaAtualId(pauta.id);
         setPautaAtualTitulo(String(pauta.title || pauta.meeting || pauta.reuniao || pauta.slug || pauta.id));
 
-        // 3) Monta lista de pleitos SOMENTE da pauta mais recente
+        // 3) Monta lista de pleitos da pauta mais recente (com flatten completo)
         const all: PleitoBase[] = [];
-        const secoes: any[] = Array.isArray(pauta?.sections)
-          ? pauta.sections
-          : (Array.isArray(pauta?.secoes) ? pauta.secoes : []);
+        const flat = flattenPleitosFromPauta(pauta);
+        flat.forEach((r: any) => {
+          const { ncm, produto, pleiteante, tipo } = projectLinha(r);
+          const n8 = onlyDigits(ncm).slice(0, 8);
+          if (hasNcm && n8.length !== 8) return;
+          if (hasNcm && !ncmSet.has(n8)) return;
 
-        secoes.forEach((sec: any) => {
-          const rows: PleitoRow[] = Array.isArray(sec?.rows) ? sec.rows : [];
-          rows.forEach((r: any) => {
-            const { ncm, produto, pleiteante, tipo } = projectLinha(r);
-            const n8 = onlyDigits(ncm).slice(0, 8);
-            if (hasNcm && n8.length !== 8) return;
-            if (hasNcm && !ncmSet.has(n8)) return;
-
-            const keyRaw = r?.key || r?.id || tryMakeKeyFromRow(r);
-            const key = String(keyRaw || "");
-
-            all.push({
-              id: key,
-              pautaId: pauta.id,
-              pleitoKey: key,
-              ncm: n8,
-              produto,
-              pleiteante,
-              tipoPleito: tipo,
-              tituloSecao: sec?.title || sec?.titulo || ""
-            });
+          const keyRaw = r?.key || r?.id || tryMakeKeyFromRow(r);
+          const key = String(keyRaw || "");
+          all.push({
+            id: key,
+            pautaId: pauta.id,
+            pleitoKey: key,
+            ncm: n8,
+            produto,
+            pleiteante,
+            tipoPleito: tipo,
+            tituloSecao: String(r?.__sec || "")
           });
         });
 
-        // 4) Atribuições (ultimo estado por pleito)
+        // 4) Atribuições completas (para status/sugestão e fallback global)
         const s = await getDocs(collection(db, "atribuicoes"));
         const atribsAll: Atrib[] = s.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
         atribsAll.sort((a, b) => toMillis(b.updatedAt) - toMillis(a.updatedAt));
 
+        // 5) Mapa de responsável por chave — MESMA FONTE DA PAUTA CAT
+        let nomes: Record<string, string> = {};
+        try {
+          const keys = Array.from(new Set(all.map((p) => p.pleitoKey).filter(Boolean)));
+          nomes = await carregarAtribuicoesPorChaves(keys);
+        } catch {
+          nomes = {};
+        }
+
         setPleitos(all);
         setAtribs(atribsAll);
+        setRespPorChave(nomes);
       } catch (e: any) {
         console.error(e);
         setErro(e?.message || "Falha ao carregar dados do Dashboard.");
@@ -247,21 +287,37 @@ const DashboardPage: React.FC = () => {
     })();
   }, [authLoading, db]);
 
-  /* ==================== JOIN + filtros ==================== */
+  /* ==================== JOIN + filtros (nome vindo da Pauta CAT) ==================== */
   const itens = useMemo(() => {
-    const byKey = new Map<string, Atrib>();
+    // Última atribuição por pleitoKey dentro da PAUTA ATUAL (para status/sugestão)
+    const byKeyScoped = new Map<string, Atrib>();
+    // Última atribuição GLOBAL por pleitoKey (qualquer pauta) — fallback para status/sugestão
+    const byKeyGlobal = new Map<string, Atrib>();
+
     for (const a of atribs) {
       const k = String(a.pleitoKey || "").trim();
       if (!k) continue;
-      const prev = byKey.get(k);
-      if (!prev || toMillis(a.updatedAt) > toMillis(prev?.updatedAt)) byKey.set(k, a);
+
+      const prevG = byKeyGlobal.get(k);
+      if (!prevG || toMillis(a.updatedAt) > toMillis(prevG?.updatedAt)) byKeyGlobal.set(k, a);
+
+      if (a.pautaId && a.pautaId === pautaAtualId) {
+        const prevS = byKeyScoped.get(k);
+        if (!prevS || toMillis(a.updatedAt) > toMillis(prevS?.updatedAt)) byKeyScoped.set(k, a);
+      }
     }
 
     let base = pleitos.map((p) => {
-      const at = byKey.get(p.pleitoKey) || null;
-      const analista = at?.responsavelNome || at?.analistaNome || (at as any)?.atribuido?.nome || "";
+      // Status/Sugestão: usa scoped -> global
+      const at = byKeyScoped.get(p.pleitoKey) || byKeyGlobal.get(p.pleitoKey) || null;
+
+      // Analista (filtro e exibição): **sempre** o da Pauta CAT quando existir
+      const analistaCat = respPorChave[p.pleitoKey] || "";
+      const analista = analistaCat || (at?.responsavelNome || at?.analistaNome || (at as any)?.atribuido?.nome || "");
+
       const sugestao = at?.analise?.sugestao ? String(at.analise.sugestao) : "";
       const status = at?.status || "Não iniciado";
+
       return { ...p, analista, sugestao, status, _atr: at };
     });
 
@@ -270,9 +326,9 @@ const DashboardPage: React.FC = () => {
     if (somenteConcluidos) base = base.filter((it) => normalizeStatus(it.status) === "concluido");
 
     return base;
-  }, [pleitos, atribs, analistaFiltro, statusFiltro, somenteConcluidos]);
+  }, [pleitos, atribs, respPorChave, analistaFiltro, statusFiltro, somenteConcluidos, pautaAtualId]);
 
-  /* ==================== Resumo + gráfico ==================== */
+  /* ==================== Resumo + gráfico (layout original) ==================== */
   const resumo = useMemo(() => {
     const acc = { nao_iniciado: 0, em_analise: 0, concluido: 0 };
     for (const it of itens) acc[normalizeStatus(it.status) as keyof typeof acc] += 1;
@@ -295,7 +351,7 @@ const DashboardPage: React.FC = () => {
     nav(`/analise/${encodeURIComponent(atr.id)}?readonly=1`);
   };
 
-  /* ==================== Render ==================== */
+  /* ==================== Render (layout intacto) ==================== */
   return (
     <div className="p-6">
       <div className="w-full space-y-6">
@@ -309,7 +365,7 @@ const DashboardPage: React.FC = () => {
             )}
           </div>
 
-          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
             {/* Filtro Analista */}
             <div className="flex items-center gap-2">
               <label className="text-sm text-gray-600 whitespace-nowrap">Analista</label>

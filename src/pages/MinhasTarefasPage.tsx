@@ -130,6 +130,18 @@ function emailToLikelyNames(email?: string): string[] {
   return [title].filter(Boolean);
 }
 
+/** normalizador tolerante para comparar nomes/emails (ignora acentos, caixa e múltiplos espaços) */
+function foldPerson(s?: string): string {
+  return (s ?? "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ");
+}
+
 function pickKey(row: AnyRow, labels: string[]) {
   const keys = Object.keys(row || {});
   const nk = (x: string) => x.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -375,6 +387,64 @@ async function fetchAtribuicoesDoUsuario(db: any, user: NonNullable<MiniUser>): 
   return runQueriesUnionParallel(qs);
 }
 
+/** Fallback: carrega TODAS as atribuições da pauta e filtra no cliente com comparação tolerante (acentos, caixa). */
+async function fallbackAtribuicoesPorPautaParaUsuario(db: any, pautaId: string, user: NonNullable<MiniUser>): Promise<Atribuicao[]> {
+  if (!pautaId) return [];
+  const col = collection(db, "atribuicoes");
+  const snap = await getDocs(query(col, where("pautaId", "==", pautaId)));
+  const arr: Atribuicao[] = [];
+  snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
+
+  const uid = user.uid || "";
+  const email = (user.email || "").toLowerCase();
+  const namesRaw = [user.nome || "", ...emailToLikelyNames(email)];
+  const namesFold = new Set(namesRaw.map(foldPerson).filter(Boolean));
+  const emailFold = foldPerson(email);
+
+  function getAsNome(v: any): string {
+    if (!v) return "";
+    if (typeof v === "string") return v;
+    if (typeof v?.nome === "string") return v.nome;
+    if (typeof v?.email === "string") return v.email;
+    return "";
+    }
+
+  const matches = (a: Atribuicao) => {
+    if (!a) return false;
+
+    // UID/email diretos
+    if (uid && (a.analistaUid === uid || a.responsavelUid === uid || a.assignedToUid === uid || (typeof (a as any)?.atribuido?.uid === "string" && (a as any).atribuido.uid === uid) || (typeof (a as any)?.atribuidoPara?.uid === "string" && (a as any).atribuidoPara.uid === uid)))
+      return true;
+    if (email && ((a.analistaEmail || "").toLowerCase() === email || (a.responsavelEmail || "").toLowerCase() === email || (a.assignedToEmail || "").toLowerCase() === email)) return true;
+    if (typeof a.atribuido === "string" && a.atribuido.toLowerCase() === email) return true;
+
+    // Nome/email com dobra de acento/caixa
+    const candidatos = [
+      a.responsavelNome,
+      a.analistaNome,
+      a.assignedToName,
+      getAsNome(a.atribuido),
+      getAsNome(a.atribuidoPara),
+      a.assignedToEmail,
+    ]
+      .map((x) => foldPerson(x))
+      .filter(Boolean);
+
+    if (emailFold && candidatos.includes(emailFold)) return true;
+    for (const n of namesFold) if (candidatos.includes(n)) return true;
+
+    // assigneeKeys (caso exista, mas está sem acento)
+    const keysFold = (a.assigneeKeys || []).map(foldPerson);
+    if (uid && keysFold.includes(foldPerson(uid))) return true;
+    if (emailFold && keysFold.includes(emailFold)) return true;
+    for (const n of namesFold) if (keysFold.includes(n)) return true;
+
+    return false;
+  };
+
+  return arr.filter(matches);
+}
+
 /* ==================== Busca da melhor análise anterior ==================== */
 const reaproveitoCache = new Map<string, string | null>(); // pleitoKey -> atribuiçãoId (ou null)
 
@@ -497,7 +567,22 @@ const MinhasTarefasPage: React.FC = () => {
           return;
         }
 
-        const mine = await fetchAtribuicoesDoUsuario(db, user);
+        // ===== 1) Busca padrão por UID/email/nome (multi-campos) =====
+        let mine = await fetchAtribuicoesDoUsuario(db, user);
+
+        // ===== 2) Fallback tolerante por pautaId (ignora acentos/caixa) =====
+        // Cobre casos antigos onde o nome tem acento diferente (ex.: "Antônio" vs "Antonio") ou valores armazenados como string simples.
+        try {
+          const mineByPauta = await fallbackAtribuicoesPorPautaParaUsuario(db, pautaId, user);
+          if (mineByPauta.length) {
+            const dedup: Record<string, Atribuicao> = {};
+            [...mine, ...mineByPauta].forEach((a) => (dedup[a.id] = a));
+            mine = Object.values(dedup);
+          }
+        } catch {
+          // ignora fallback silenciosamente
+        }
+
         const mineScoped = mine.filter((a) => (a.pautaId || "") === pautaId);
 
         const byScopedKey = new Map<string, Atribuicao>();
@@ -561,6 +646,7 @@ const MinhasTarefasPage: React.FC = () => {
             }
           }
 
+          // ===== Extra de reaproveitamento: se o usuário já teve análise histórica do mesmo pleito, cria card "Novo" na pauta atual =====
           const assignedKeys = new Set(merged.map((a) => String(a.pleitoKey || "")).filter(Boolean));
           const myHistoricKeys = new Set(mine.filter((a) => a.pleitoKey && a.pautaId !== pautaId).map((a) => String(a.pleitoKey)));
 
@@ -588,7 +674,7 @@ const MinhasTarefasPage: React.FC = () => {
           }
         }
 
-        // marca retirados respeitando base
+        // ===== marca retirados respeitando base (retificação) =====
         try {
           const sel = pauta ?? (await getPautasByIdsCached(db, [pautaId]))[pautaId];
           const baseIdForRetifs = sel?.diffResumo?.baseId || pautaId;
