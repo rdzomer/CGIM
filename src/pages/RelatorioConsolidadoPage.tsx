@@ -1,3 +1,4 @@
+// src/pages/RelatorioConsolidadoPage.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
@@ -15,7 +16,7 @@ import { exportRelatorioDocx, CabecalhoRelatorio } from "../services/relatorioEx
 /** ===================== Utils ===================== */
 const norm = (s?: any) =>
   String(s ?? "")
-    .replace(/\u00A0/g, " ")
+    .replace(/\u00A0/g, " ")      // NBSP -> espaço normal
     .replace(/\s+/g, " ")
     .trim();
 
@@ -24,6 +25,12 @@ const normKey = (s?: any) =>
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+
+const softKey = (s?: any) =>
+  normKey(s)
+    .replace(/[^\w|]+/g, " ") // mantém letras/dígitos/_ e pipe; o resto vira espaço
+    .replace(/\s+/g, " ")
+    .trim();
 
 const only8 = (s?: any) => norm(s).replace(/\D+/g, "").slice(0, 8);
 
@@ -39,17 +46,29 @@ const normalizeStatus = (s?: string) => {
   return "nao_iniciado";
 };
 
-const hasTecnicaOuSugestao = (a?: AnaliseBloco | null) => {
-  if (!a) return false;
-  return norm(a.tecnica).length > 0 || norm(a.sugestao).length > 0;
-};
+// Remove HTML e marcações vazias (“—”, “-”, &nbsp;)
+function cleanRichText(input?: any) {
+  let t = String(input ?? "");
+  if (!t) return "";
+  t = t
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>\s*<p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&#160;/gi, " ")
+    .replace(/[\u2000-\u200B]/g, " ") // espaços finos/zero-width
+    .replace(/[–—−]/g, "-");
+  t = norm(t);
+  if (/^[-–—]+$/.test(t)) return "";
+  return t;
+}
 
-const escapeHtml = (t: string) =>
-  t
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\n/g, "<br>");
+function hasTecnicaOuSugestaoBloco(bl?: AnaliseBloco | null) {
+  if (!bl) return false;
+  const t = cleanRichText(bl.tecnica);
+  const s = cleanRichText(bl.sugestao);
+  return t.length > 0 || s.length > 0;
+}
 
 /** ===================== Tipos ===================== */
 type PautaDoc = {
@@ -80,9 +99,9 @@ type Atribuicao = {
   pleiteante?: string;
   tipoPleito?: string;
   status?: string;
-  analise?: AnaliseBloco;
+  analise?: AnaliseBloco | (AnaliseBloco & { analiseTecnica?: string; sugestaoCgim?: string }) | null;
   updatedAt?: any;
-  // campos legados (fallback)
+  // campos legados (raiz)
   resumo?: string;
   dadosComercio?: string;
   analiseTecnica?: string;
@@ -168,23 +187,30 @@ function projectLinha(row: Record<string, any>) {
   return { ncm, produto, pleiteante, tipoPleito };
 }
 
-/** Gera a mesma chave usada nas atribuições */
+/** Gera a mesma chave usada nas atribuições (com normalização tolerante) */
 function gerarPleitoKeyFromRow(row: any) {
   const { ncm, produto, pleiteante } = projectLinha(row);
-  const key = [only8(ncm), norm(produto), norm(pleiteante)].filter(Boolean).join("|");
+  const key = [only8(ncm), softKey(produto), softKey(pleiteante)].filter(Boolean).join("|");
   return key;
 }
 
-/** Fallback para análises no formato legado (campos soltos) */
-function analiseFromLegacy(a: Atribuicao): AnaliseBloco {
-  const resumo = a.resumo ?? "";
-  const comercio = a.dadosComercio ?? "";
-  const tecnica = a.analiseTecnica ?? "";
-  const sugestao = a.sugestaoCgim ?? "";
-  if ([resumo, comercio, tecnica, sugestao].some((v) => norm(v).length > 0)) {
-    return { resumo, comercio, tecnica, sugestao };
-  }
-  return null;
+/** Consolida análise a partir de todos os formatos possíveis (novo e legados) */
+function unificarAnalise(a: Atribuicao): NonNullable<AnaliseBloco> {
+  const an = (a.analise ?? {}) as any;
+  const resumo =
+    cleanRichText(an?.resumo) || cleanRichText(a.resumo);
+  const comercio =
+    cleanRichText(an?.comercio) || cleanRichText(a.dadosComercio);
+  const tecnica =
+    cleanRichText(an?.tecnica) ||
+    cleanRichText(an?.analiseTecnica) ||   // legado aninhado
+    cleanRichText(a.analiseTecnica);       // legado raiz
+  const sugestao =
+    cleanRichText(an?.sugestao) ||
+    cleanRichText(an?.sugestaoCgim) ||     // legado aninhado
+    cleanRichText(a.sugestaoCgim);         // legado raiz
+
+  return { resumo, comercio, tecnica, sugestao };
 }
 
 /** Heurística: remover artefatos de OCR/planilha como "Col_1", "Col. 1", "col-1" */
@@ -194,6 +220,19 @@ function isColArtefact(key: string) {
   if (/^col[\s._-]*\d+\s*\(.+\)$/.test(k)) return true;
   if (/^col\.\s*\d+$/.test(k)) return true;
   return false;
+}
+
+/** Normaliza o título da seção para exibição consistente */
+function normalizarSecao(input: string) {
+  const original = norm(input);
+  let nk = normKey(original)
+    .replace(/^\s*\d+(?:\.\d+)*\s+/, "")    // remove "2.3 "
+    .replace(/\s+(no|na)\s+cat\b/g, "")     // remove "no CAT"/"na CAT"
+    .replace(/\s+(no|na)\s+comit[eê]\b/g, "")
+    .trim();
+  if (/\bpleitos?\s+novos?\b/.test(nk)) return "Pleitos Novos";
+  if (/\breanalisad/.test(nk)) return "Pleitos Reanalisados";
+  return original.replace(/^\s*\d+(?:\.\d+)*\s+/, "").replace(/\s+(no|na)\s+CAT\b/i, "").trim();
 }
 
 /** ===================== Página ===================== */
@@ -330,17 +369,17 @@ const RelatorioConsolidadoPage: React.FC = () => {
         const snap1 = await getDocs(query(col, where("pautaId", "==", pautaSel)));
         snap1.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
 
-        // 2) SEMPRE completar por pleitoKey das linhas da pauta
+        // 2) completar por pleitoKey geradas a partir das linhas da pauta (tolerante)
         if (pautaDoc) {
           const rows = flattenPauta(pautaDoc);
           const keysSet = new Set<string>();
           for (const { row } of rows) {
             const k = gerarPleitoKeyFromRow(row);
-            if (k) keysSet.add(norm(k));
+            if (k) keysSet.add(softKey(k));
           }
 
           const jaTem = new Set<string>(
-            arr.map((a) => norm(String(a.pleitoKey || ""))).filter(Boolean)
+            arr.map((a) => softKey(String(a.pleitoKey || ""))).filter(Boolean)
           );
 
           const missing = Array.from(keysSet).filter((k) => k && !jaTem.has(k));
@@ -358,11 +397,8 @@ const RelatorioConsolidadoPage: React.FC = () => {
         for (const a of arr) dedupMap.set(a.id, a);
         const dedup = Array.from(dedupMap.values());
 
-        const ajustados = dedup.map((a) => {
-          const analise = a.analise ?? analiseFromLegacy(a);
-          const status = normalizeStatus(a.status);
-          return { ...a, analise, status };
-        });
+        // normaliza somente o status aqui; análise será unificada na hora de montar itens
+        const ajustados = dedup.map((a) => ({ ...a, status: normalizeStatus(a.status) }));
 
         setAtribuicoes(ajustados);
       } finally {
@@ -380,32 +416,77 @@ const RelatorioConsolidadoPage: React.FC = () => {
     let i = 1;
 
     const byKey = new Map<string, Atribuicao>();
-    const byPair = new Map<string, Atribuicao>();   // ncm|produto
-    const byPair2 = new Map<string, Atribuicao>();  // ncm|pleiteante
+    const byPair = new Map<string, Atribuicao>();   // ncm|produto (soft)
+    const byPair2 = new Map<string, Atribuicao>();  // ncm|pleiteante (soft)
 
     for (const a of atribuicoes) {
       const ncm8 = only8(a.ncm);
-      const prod = normKey(a.produto);
-      const pl = normKey(a.pleiteante || "");
+      const prod = softKey(a.produto);
+      const pl = softKey(a.pleiteante || "");
       const pair = `${ncm8}|${prod}`;
       const pair2 = `${ncm8}|${pl}`;
-      if (a.pleitoKey) byKey.set(norm(a.pleitoKey), a);
+      if (a.pleitoKey) byKey.set(softKey(a.pleitoKey), a);
       if (ncm8 && prod) byPair.set(pair, a);
       if (ncm8 && pl) byPair2.set(pair2, a);
     }
 
-    const isOk = (a: Atribuicao | undefined) =>
-      !!a && normalizeStatus(a.status) === "concluido" && hasTecnicaOuSugestao(a.analise);
+    /** Critério de inclusão:
+     *  - precisa estar CONCLUÍDO
+     *  - e ter Análise Técnica OU Sugestão CGIM preenchidas (aceitando formatos legados)
+     */
+    function isOk(at?: Atribuicao) {
+      if (!at) return false;
+      if (normalizeStatus(at.status) !== "concluido") return false;
+      const an = unificarAnalise(at);
+      return hasTecnicaOuSugestaoBloco(an);
+    }
 
     for (const { secao, row } of rows) {
       const { ncm, produto, pleiteante, tipoPleito } = projectLinha(row);
-      const key = gerarPleitoKeyFromRow(row);
-      let a: Atribuicao | undefined = undefined;
+      const keySoft = gerarPleitoKeyFromRow(row); // soft
+      const n8 = only8(ncm);
+      const prodSoft = softKey(produto);
+      const pleitSoft = softKey(pleiteante);
 
-      a =
-        byKey.get(norm(key)) ||
-        byPair.get(`${only8(ncm)}|${normKey(produto)}`) ||
-        byPair2.get(`${only8(ncm)}|${normKey(pleiteante)}`);
+      let a: Atribuicao | undefined =
+        byKey.get(keySoft) ||
+        byPair.get(`${n8}|${prodSoft}`) ||
+        byPair2.get(`${n8}|${pleitSoft}`);
+
+      // Fallback 1: NCM igual + produto “contém/contido em”
+      if (!a && n8) {
+        const cands = atribuicoes.filter((x) => only8(x.ncm) === n8);
+        const found = cands.find((x) => {
+          const ps = softKey(x.produto);
+          return ps && prodSoft && (ps.includes(prodSoft) || prodSoft.includes(ps));
+        });
+        if (found) a = found;
+      }
+
+      // Fallback 2: NCM igual + pleiteante “contém/contido em”
+      if (!a && n8) {
+        const cands = atribuicoes.filter((x) => only8(x.ncm) === n8);
+        const found = cands.find((x) => {
+          const pls = softKey(x.pleiteante || "");
+          return pls && pleitSoft && (pls.includes(pleitSoft) || pleitSoft.includes(pls));
+        });
+        if (found) a = found;
+      }
+
+      // Fallback 3: melhor candidato por score (NCM + similaridade básica)
+      if (!a) {
+        let best: { a: Atribuicao; score: number } | null = null;
+        for (const x of atribuicoes) {
+          let s = 0;
+          if (only8(x.ncm) === n8 && n8) s += 2;
+          const xp = softKey(x.produto);
+          const xl = softKey(x.pleiteante || "");
+          if (xp && prodSoft) s += xp === prodSoft ? 2 : (xp.includes(prodSoft) || prodSoft.includes(xp) ? 1 : 0);
+          if (xl && pleitSoft) s += xl === pleitSoft ? 2 : (xl.includes(pleitSoft) || pleitSoft.includes(xl) ? 1 : 0);
+          if (s > 2 && (!best || s > best.score)) best = { a: x, score: s };
+        }
+        if (best) a = best.a;
+      }
 
       if (!isOk(a)) continue;
 
@@ -443,20 +524,21 @@ const RelatorioConsolidadoPage: React.FC = () => {
         }
       });
 
-      const analise = a!.analise!;
+      const analise = unificarAnalise(a!);
+
       out.push({
         indice: i++,
-        secaoTitulo: String(a?.tituloSecao || secao || ""),
+        secaoTitulo: normalizarSecao(String(a?.tituloSecao || secao || "")),
         tipoPleito: String(a?.tipoPleito || tipoPleito || ""),
         ncm: fmtNcm(a?.ncm || ncm || ""),
         produto: String(a?.produto || produto || ""),
         pleiteante: String(a?.pleiteante || pleiteante || ""),
         infoDaPauta: info,
         analise: {
-          resumo: norm(analise.resumo),
-          comercio: norm(analise.comercio),
-          tecnica: norm(analise.tecnica),
-          sugestao: norm(analise.sugestao),
+          resumo: cleanRichText(analise.resumo),
+          comercio: cleanRichText(analise.comercio),
+          tecnica: cleanRichText(analise.tecnica),
+          sugestao: cleanRichText(analise.sugestao),
         },
         atribId: a?.id,
       });

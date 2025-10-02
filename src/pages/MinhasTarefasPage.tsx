@@ -266,7 +266,7 @@ async function fetchAllPautasOrdered(db: any): Promise<PautaDoc[]> {
   try {
     const snap = await getDocs(collection(db, "pautas"));
     const arr: PautaDoc[] = [];
-    snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
+    snap.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) })); 
     arr.sort((a, b) => uploadTs(b) - uploadTs(a));
     return arr;
   } catch {
@@ -407,18 +407,16 @@ async function fallbackAtribuicoesPorPautaParaUsuario(db: any, pautaId: string, 
     if (typeof v?.nome === "string") return v.nome;
     if (typeof v?.email === "string") return v.email;
     return "";
-    }
+  }
 
   const matches = (a: Atribuicao) => {
     if (!a) return false;
 
-    // UID/email diretos
     if (uid && (a.analistaUid === uid || a.responsavelUid === uid || a.assignedToUid === uid || (typeof (a as any)?.atribuido?.uid === "string" && (a as any).atribuido.uid === uid) || (typeof (a as any)?.atribuidoPara?.uid === "string" && (a as any).atribuidoPara.uid === uid)))
       return true;
     if (email && ((a.analistaEmail || "").toLowerCase() === email || (a.responsavelEmail || "").toLowerCase() === email || (a.assignedToEmail || "").toLowerCase() === email)) return true;
     if (typeof a.atribuido === "string" && a.atribuido.toLowerCase() === email) return true;
 
-    // Nome/email com dobra de acento/caixa
     const candidatos = [
       a.responsavelNome,
       a.analistaNome,
@@ -431,13 +429,12 @@ async function fallbackAtribuicoesPorPautaParaUsuario(db: any, pautaId: string, 
       .filter(Boolean);
 
     if (emailFold && candidatos.includes(emailFold)) return true;
-    for (const n of namesFold) if (candidatos.includes(n)) return true;
+    for (const n of Array.from(namesFold)) if (candidatos.includes(n)) return true;
 
-    // assigneeKeys (caso exista, mas está sem acento)
     const keysFold = (a.assigneeKeys || []).map(foldPerson);
     if (uid && keysFold.includes(foldPerson(uid))) return true;
     if (emailFold && keysFold.includes(emailFold)) return true;
-    for (const n of namesFold) if (keysFold.includes(n)) return true;
+    for (const n of Array.from(namesFold)) if (keysFold.includes(n)) return true;
 
     return false;
   };
@@ -446,29 +443,71 @@ async function fallbackAtribuicoesPorPautaParaUsuario(db: any, pautaId: string, 
 }
 
 /* ==================== Busca da melhor análise anterior ==================== */
-const reaproveitoCache = new Map<string, string | null>(); // pleitoKey -> atribuiçãoId (ou null)
+const reaproveitoCache = new Map<string, string | null>(); // chave-composta -> atribuiçãoId (ou null)
 
-async function findBestPriorAnalysisId(db: any, pleitoKey?: string, excludePautaId?: string): Promise<string | null> {
-  const k = (pleitoKey || "").trim();
-  if (!k) return null;
+/** NOVO: tenta por pleitoKey; se não achar, cai para NCM(8) + Produto normalizado */
+async function findBestPriorAnalysisId(db: any, t: Atribuicao, excludePautaId?: string): Promise<string | null> {
+  const k = (t.pleitoKey || "").trim();
+  const n8 = onlyDigits(t.ncm).slice(0, 8);
+  const prodNk = normKey(t.produto || "");
+  const pltNk = normKey(t.pleiteante || "");
 
-  if (reaproveitoCache.has(k)) return reaproveitoCache.get(k)!;
+  const cacheKey = `${k || "no_key"}__${n8}__${prodNk}__${pltNk}__${excludePautaId || ""}`;
+  if (reaproveitoCache.has(cacheKey)) return reaproveitoCache.get(cacheKey)!;
 
   const col = collection(db, "atribuicoes");
-  const snap = await getDocs(query(col, where("pleitoKey", "==", k)));
-  const cand: Atribuicao[] = [];
-  snap.forEach((d) => {
-    const a = { id: d.id, ...(d.data() as any) } as Atribuicao;
-    if (excludePautaId && a.pautaId === excludePautaId) return;
-    cand.push(a);
-  });
+  const candMap: Record<string, Atribuicao> = {};
 
+  // 1) Por pleitoKey (igualdade exata)
+  if (k) {
+    const snapK = await getDocs(query(col, where("pleitoKey", "==", k)));
+    snapK.forEach((d) => {
+      const a = { id: d.id, ...(d.data() as any) } as Atribuicao;
+      if (excludePautaId && a.pautaId === excludePautaId) return;
+      candMap[a.id] = a;
+    });
+  }
+
+  // 2) Fallback por NCM (8 dígitos) + filtro local por Produto (normalizado) e, se existir, Pleiteante
+  if (Object.keys(candMap).length === 0 && n8) {
+    try {
+      // tenta tanto ncm = "7013.49.00" quanto "70134900"
+      const q1 = await getDocs(query(col, where("ncm", "==", n8)));
+      q1.forEach((d) => {
+        const a = { id: d.id, ...(d.data() as any) } as Atribuicao;
+        candMap[a.id] = a;
+      });
+    } catch {}
+    try {
+      const q2 = await getDocs(query(col, where("ncm", "==", t.ncm || "")));
+      q2.forEach((d) => {
+        const a = { id: d.id, ...(d.data() as any) } as Atribuicao;
+        candMap[a.id] = a;
+      });
+    } catch {}
+
+    // filtro local por produto/pleiteante normalizados
+    for (const id of Object.keys(candMap)) {
+      const a = candMap[id];
+      if (excludePautaId && a.pautaId === excludePautaId) {
+        delete candMap[id];
+        continue;
+      }
+      const prodA = normKey(a.produto || "");
+      const pltA = normKey(a.pleiteante || "");
+      const prodOk = !!prodNk && (prodA === prodNk || (prodNk && prodA.includes(prodNk)) || (prodA && prodNk.includes(prodA)));
+      const pltOk = !pltNk || pltA === pltNk || prodOk; // se não tiver pleiteante, não bloqueia
+      if (!prodOk || !pltOk) delete candMap[id];
+    }
+  }
+
+  const cand = Object.values(candMap);
   if (!cand.length) {
-    reaproveitoCache.set(k, null);
+    reaproveitoCache.set(cacheKey, null);
     return null;
   }
 
-  const rank = (x: Atribuicao) => {
+  const contentRank = (x: Atribuicao) => {
     const st = normalizeStatus(x.status);
     const temTexto =
       !!(x?.analise?.resumo?.trim() || x?.analise?.comercio?.trim() || x?.analise?.tecnica?.trim() || x?.analise?.sugestao?.trim());
@@ -477,17 +516,33 @@ async function findBestPriorAnalysisId(db: any, pleitoKey?: string, excludePauta
     return 0; // vazio não serve para reaproveitar
   };
 
+  const proximityRank = (x: Atribuicao) => {
+    const prodA = normKey(x.produto || "");
+    const pltA = normKey(x.pleiteante || "");
+    let score = 0;
+    if (prodA && prodNk) {
+      if (prodA === prodNk) score += 2;
+      else if (prodA.includes(prodNk) || prodNk.includes(prodA)) score += 1;
+    }
+    if (pltNk && pltA) {
+      if (pltA === pltNk) score += 1;
+    }
+    return score;
+  };
+
   cand.sort((a, b) => {
-    const r = rank(b) - rank(a);
-    if (r !== 0) return r;
+    const r1 = contentRank(b) - contentRank(a);
+    if (r1 !== 0) return r1;
+    const r2 = proximityRank(b) - proximityRank(a);
+    if (r2 !== 0) return r2;
     return toMillis(b.updatedAt) - toMillis(a.updatedAt);
   });
 
   const best = cand[0];
-  const bestRank = best ? rank(best) : 0;
+  const bestRank = contentRank(best);
   const result = best && bestRank > 0 ? best.id : null;
 
-  reaproveitoCache.set(k, result);
+  reaproveitoCache.set(cacheKey, result);
   return result;
 }
 
@@ -571,7 +626,6 @@ const MinhasTarefasPage: React.FC = () => {
         let mine = await fetchAtribuicoesDoUsuario(db, user);
 
         // ===== 2) Fallback tolerante por pautaId (ignora acentos/caixa) =====
-        // Cobre casos antigos onde o nome tem acento diferente (ex.: "Antônio" vs "Antonio") ou valores armazenados como string simples.
         try {
           const mineByPauta = await fallbackAtribuicoesPorPautaParaUsuario(db, pautaId, user);
           if (mineByPauta.length) {
@@ -579,9 +633,7 @@ const MinhasTarefasPage: React.FC = () => {
             [...mine, ...mineByPauta].forEach((a) => (dedup[a.id] = a));
             mine = Object.values(dedup);
           }
-        } catch {
-          // ignora fallback silenciosamente
-        }
+        } catch {}
 
         const mineScoped = mine.filter((a) => (a.pautaId || "") === pautaId);
 
@@ -646,7 +698,6 @@ const MinhasTarefasPage: React.FC = () => {
             }
           }
 
-          // ===== Extra de reaproveitamento: se o usuário já teve análise histórica do mesmo pleito, cria card "Novo" na pauta atual =====
           const assignedKeys = new Set(merged.map((a) => String(a.pleitoKey || "")).filter(Boolean));
           const myHistoricKeys = new Set(mine.filter((a) => a.pleitoKey && a.pautaId !== pautaId).map((a) => String(a.pleitoKey)));
 
@@ -674,7 +725,7 @@ const MinhasTarefasPage: React.FC = () => {
           }
         }
 
-        // ===== marca retirados respeitando base (retificação) =====
+        // marca retirados respeitando base
         try {
           const sel = pauta ?? (await getPautasByIdsCached(db, [pautaId]))[pautaId];
           const baseIdForRetifs = sel?.diffResumo?.baseId || pautaId;
@@ -710,7 +761,7 @@ const MinhasTarefasPage: React.FC = () => {
 
         const entries = await Promise.all(
           merged.map(async (t) => {
-            const prior = await findBestPriorAnalysisId(db, t.pleitoKey, pautaId);
+            const prior = await findBestPriorAnalysisId(db, t, pautaId);
             return [t.id, prior] as const;
           })
         );
@@ -744,7 +795,6 @@ const MinhasTarefasPage: React.FC = () => {
   function buildOpenUrl(t: Atribuicao, opts?: { copyFrom?: string | null }) {
     const atrId = t.id || makeAtribuicaoId(`${t.pautaId || pautaId}__${t.pleitoKey || ""}`);
     const qs = new URLSearchParams();
-    // Usar blank=1 somente quando for reaproveitar ou quando o card foi criado como extra:
     const shouldBlank = !!opts?.copyFrom || !!t.__extraReaproveitar;
     if (shouldBlank) qs.set("blank", "1");
 
@@ -760,7 +810,7 @@ const MinhasTarefasPage: React.FC = () => {
   }
 
   const openAnalyse = (t: Atribuicao) => {
-    const url = buildOpenUrl(t); // agora abre preservando conteúdo salvo
+    const url = buildOpenUrl(t);
     (document.activeElement as HTMLElement | null)?.blur?.();
     nav(url);
   };
@@ -768,7 +818,7 @@ const MinhasTarefasPage: React.FC = () => {
   function onReaproveitar(t: Atribuicao) {
     const sourceId = priorMap[t.id] || null;
     if (!sourceId) return;
-    const url = buildOpenUrl(t, { copyFrom: sourceId }); // blank=1 apenas aqui
+    const url = buildOpenUrl(t, { copyFrom: sourceId });
     (document.activeElement as HTMLElement | null)?.blur?.();
     nav(url);
   }
@@ -883,7 +933,7 @@ const MinhasTarefasPage: React.FC = () => {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                 {tarefas.map((t) => {
-                  const canReuse = !!priorMap[t.id]; // só mostra se há análise anterior válida
+                  const canReuse = !!priorMap[t.id];
                   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
