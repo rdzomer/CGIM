@@ -709,7 +709,7 @@ const MinhasTarefasPage: React.FC = () => {
 
             const pr = projectLinha(r);
             const extra: Atribuicao = {
-              id: makeAtribuicaoId(`${pautaId}__${k}`),
+              id: makeAtribuicaoId(`${k}`), // <<< CORRIGIDO: só pleitoKey
               pautaId,
               pleitoKey: k,
               ncm: pr.ncm,
@@ -789,11 +789,11 @@ const MinhasTarefasPage: React.FC = () => {
     [resumo]
   );
 
-  /** Monta a URL para abrir a análise.
-   * Importante: NÃO usar `blank=1` no fluxo normal, para não apagar conteúdo já salvo.
-   * Usar `blank=1` apenas quando houver reaproveitamento (copyFrom) ou quando o card for extra de reaproveitar. */
+  /** URL para abrir a análise.
+   * Importante: NÃO usar `blank=1` no fluxo normal; usar `blank=1` apenas no reaproveitamento. */
   function buildOpenUrl(t: Atribuicao, opts?: { copyFrom?: string | null }) {
-    const atrId = t.id || makeAtribuicaoId(`${t.pautaId || pautaId}__${t.pleitoKey || ""}`);
+    // <<< CORRIGIDO: o ID real precisa ser somente a pleitoKey codificada
+    const atrId = t.id || makeAtribuicaoId(`${t.pleitoKey || ""}`);
     const qs = new URLSearchParams();
     const shouldBlank = !!opts?.copyFrom || !!t.__extraReaproveitar;
     if (shouldBlank) qs.set("blank", "1");
