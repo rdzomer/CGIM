@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { doc, getDoc, getFirestore, updateDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { getAuth } from "firebase/auth";
 import toast from "react-hot-toast";
 import { FileText } from "lucide-react";
 import { getHistoricoByPleitoKey, upsertHistoricoFromAtribuicao } from "../services/historicoAnalisesService";
@@ -61,10 +62,7 @@ const HIDDEN_KEYS = /(key|pleitokey|__sec|_id|id|timestamp|created|updated|hash|
 const hasContent = (a?: Analise | null) =>
   !!(a && ((norm(a.resumo).length > 0) || (norm(a.comercio).length > 0) || (norm(a.tecnica).length > 0) || (norm(a.sugestao).length > 0)));
 
-/** Extrai todos os números SEI de uma string/array.
- *  Aceita entradas como "19971.000181/2025-81 19971.000182/2025-26"
- *  e retorna ["19971.000181/2025-81","19971.000182/2025-26"].
- */
+/** Extrai todos os números SEI de uma string/array. */
 function normalizeSeiList(value?: string | string[]): string[] {
   if (!value) return [];
   const inputs = Array.isArray(value) ? value : [value];
@@ -79,7 +77,6 @@ function normalizeSeiList(value?: string | string[]): string[] {
     if (matches.length) {
       for (const m of matches) if (!seen.has(m)) { seen.add(m); out.push(m); }
     } else {
-      // fallback: quebra por espaços / vírgulas / ponto e vírgula / barras verticais
       const parts = s.split(/[\s,;|]+/g).map((t) => t.trim()).filter(Boolean);
       for (const p of parts) if (!seen.has(p)) { seen.add(p); out.push(p); }
     }
@@ -182,6 +179,9 @@ const AnalisePleitoPage: React.FC = () => {
         let v: any = null;
 
         if (!snap.exists()) {
+          // >>> Seed com responsável (auth atual) para satisfazer regras
+          const auth = getAuth();
+          const u = auth.currentUser;
           const seed = {
             pautaId: params.get("pautaId") || "",
             pleitoKey: params.get("pleitoKey") || "",
@@ -190,14 +190,33 @@ const AnalisePleitoPage: React.FC = () => {
             pleiteante: params.get("pleiteante") || "",
             tituloSecao: params.get("tituloSecao") || "",
             tipoPleito: params.get("tipoPleito") || "",
+            status: "Não iniciado",
+            analise: null,
+            updatedAt: serverTimestamp(),
+            // <<< novos campos de ownership
+            responsavelUid: u?.uid || "",
+            responsavelEmail: u?.email?.toLowerCase() || "",
+            responsavelNome: u?.displayName || "",
+            assigneeKeys: Array.from(
+              new Set(
+                [
+                  u?.uid,
+                  u?.email?.toLowerCase(),
+                  ...(u?.email ? u.email.split("@")[0].split(/[.\-_]/).filter(Boolean) : []),
+                  u?.displayName,
+                ]
+                  .map((x) => (x ? String(x).trim() : ""))
+                  .filter(Boolean)
+              )
+            ),
           };
-          const hasSeed = Object.values(seed).some(Boolean);
+          const hasSeed = Object.values({
+            pautaId: seed.pautaId, pleitoKey: seed.pleitoKey, ncm: seed.ncm,
+            produto: seed.produto, pleiteante: seed.pleiteante, tituloSecao: seed.tituloSecao, tipoPleito: seed.tipoPleito,
+          }).some(Boolean);
+
           if (isBlank || hasSeed) {
-            await setDoc(
-              ref,
-              { ...seed, status: "Não iniciado", analise: null, updatedAt: serverTimestamp() },
-              { merge: true }
-            );
+            await setDoc(ref, seed, { merge: true });
             v = seed;
           } else {
             toast.error("Atribuição não encontrada.");
