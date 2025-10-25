@@ -142,6 +142,15 @@ function pickFromSources(sources: any[], aliases: string[], { raw = false }: { r
   return undefined;
 }
 
+/* ---------------------- Normalização de status ---------------------- */
+function canonicalStatus(input?: string | null): "Em análise" | "Concluído" | undefined {
+  const s = (input || "").toString().trim().toLowerCase();
+  if (!s) return undefined;
+  if (/conclu[ií]d/.test(s)) return "Concluído";
+  if (/em[\s_]?an[aá]lis/.test(s)) return "Em análise";
+  return undefined;
+}
+
 /* ========================================================================== */
 
 const AnalisePleitoPage: React.FC = () => {
@@ -179,7 +188,7 @@ const AnalisePleitoPage: React.FC = () => {
         let v: any = null;
 
         if (!snap.exists()) {
-          // >>> Seed com responsável (auth atual) para satisfazer regras
+          // Seed com responsável (auth atual) para satisfazer regras
           const auth = getAuth();
           const u = auth.currentUser;
           const seed = {
@@ -193,7 +202,6 @@ const AnalisePleitoPage: React.FC = () => {
             status: "Não iniciado",
             analise: null,
             updatedAt: serverTimestamp(),
-            // <<< novos campos de ownership
             responsavelUid: u?.uid || "",
             responsavelEmail: u?.email?.toLowerCase() || "",
             responsavelNome: u?.displayName || "",
@@ -244,7 +252,7 @@ const AnalisePleitoPage: React.FC = () => {
         setAtr(atrib);
         setPos(atrib.posDeliberacao || {});
 
-        // ===== init form =====
+        // init form
         if (copyFrom) {
           try {
             const src = await getDoc(doc(db, "atribuicoes", copyFrom));
@@ -286,7 +294,7 @@ const AnalisePleitoPage: React.FC = () => {
           } catch {}
         }
 
-        // ===== ficha/pedido a partir da linha =====
+        // ficha/pedido a partir da linha
         const base: any = v?.linhaPauta || {};
         const fichaLocal: Record<string, string> = {};
         Object.entries(base).forEach(([k, val]) => {
@@ -298,7 +306,7 @@ const AnalisePleitoPage: React.FC = () => {
         });
         setFicha(fichaLocal);
 
-        // tenta doc do pleito (pode conter dadosResumidos)
+        // tenta doc do pleito
         let pleitoDocData: any = null;
         try {
           const pk = atrib.pleitoKey || v?.pleitoKey;
@@ -312,14 +320,13 @@ const AnalisePleitoPage: React.FC = () => {
         let pedidoLocal = extrairPedidoAmplo(base, pleitoDocData);
         setPedido(pedidoLocal);
 
-        // ======= FALLBACK FINAL: buscar na pauta (pautaId) =======
+        // fallback por pauta para processo SEI
         if ((!pedidoLocal?.processoSei || (Array.isArray(pedidoLocal.processoSei) && pedidoLocal.processoSei.length === 0)) && atrib.pautaId) {
           try {
             const pautaSnap = await getDoc(doc(db, "pautas", atrib.pautaId));
             if (pautaSnap.exists()) {
               const pauta = pautaSnap.data();
               const rows = flattenPauta(pauta);
-              // localizar a linha correspondente
               const alvo = rows.find(({ row }) => {
                 const keyRow = gerarPleitoKeyFromRow(row);
                 const byKey = atrib.pleitoKey && norm(keyRow) === norm(atrib.pleitoKey);
@@ -332,7 +339,6 @@ const AnalisePleitoPage: React.FC = () => {
 
               if (alvo) {
                 const pedidoDoAlvo = extrairPedidoAmplo(alvo, undefined);
-                // preenche apenas faltantes
                 pedidoLocal = {
                   ...pedidoLocal,
                   processoSei: normalizeSeiList(pedidoLocal.processoSei as any).length
@@ -353,11 +359,14 @@ const AnalisePleitoPage: React.FC = () => {
   }, [atrId, copyFrom, isBlank]);
 
   /* ------------------------------ salvar análise ------------------------------ */
-  async function salvar(status?: "em_analise" | "concluido") {
+  async function salvar(statusRaw?: string) {
     if (!atrId) return;
     setSalvando(true);
     try {
       const db = getFirestore();
+
+      // Normalização de status (aceita "concluido", "Concluído", etc.)
+      const normStatus = canonicalStatus(statusRaw);
       const payload: any = {
         analise: {
           resumo: form.resumo || "",
@@ -367,9 +376,17 @@ const AnalisePleitoPage: React.FC = () => {
         },
         updatedAt: serverTimestamp(),
       };
-      if (status) payload.status = status;
+
+      if (normStatus === "Em análise") {
+        payload.status = "Em análise";
+      } else if (normStatus === "Concluído") {
+        payload.status = "Concluído";
+        payload.concludedAt = serverTimestamp();
+      }
+
       await updateDoc(doc(db, "atribuicoes", atrId), payload);
-      toast.success("Análise salva.");
+      toast.success(normStatus === "Concluído" ? "Análise concluída." : "Análise salva.");
+
       try { await upsertHistoricoFromAtribuicao(db, atrId); } catch {}
     } finally {
       setSalvando(false);
@@ -448,7 +465,8 @@ const AnalisePleitoPage: React.FC = () => {
       if (!v) return undefined;
       if (Array.isArray(v)) return v.map(String).filter(Boolean);
       const s = String(v || "").trim();
-      return s ? normalizeSeiList(s) : undefined;
+      // aqui, para links, mantemos a string como veio (pode ser URL do SEI).
+      return s ? [s] : undefined;
     };
 
     const pick = (aliases: string[]) => {
@@ -550,10 +568,10 @@ const AnalisePleitoPage: React.FC = () => {
             >
               Abrir pauta
             </button>
-            <button className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700" disabled={salvando} onClick={() => salvar("em_analise")}>
+            <button className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700" disabled={salvando} onClick={() => salvar("Em análise")}>
               Salvar análise
             </button>
-            <button className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700" disabled={salvando} onClick={() => salvar("concluido")}>
+            <button className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700" disabled={salvando} onClick={() => salvar("Concluído")}>
               Concluir
             </button>
           </div>
@@ -650,10 +668,10 @@ const AnalisePleitoPage: React.FC = () => {
           <button className="px-4 py-2.5 rounded-xl border hover:bg-gray-50" disabled={salvando} onClick={() => salvar()}>
             Salvar rascunho
           </button>
-          <button className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60" disabled={salvando} onClick={() => salvar("em_analise")}>
+          <button className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60" disabled={salvando} onClick={() => salvar("Em análise")}>
             Salvar e continuar
           </button>
-          <button className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60" disabled={salvando} onClick={() => salvar("concluido")}>
+          <button className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60" disabled={salvando} onClick={() => salvar("Concluído")}>
             Concluir
           </button>
         </div>
