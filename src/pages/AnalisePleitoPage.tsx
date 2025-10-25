@@ -25,6 +25,7 @@ type Atrib = {
   pautaId?: string;
   pleitoKey?: string;
   status?: string;
+  statusCode?: "em_analise" | "concluido" | "nao_iniciado";
   analise?: Analise | null;
   linhaPauta?: any;
   posDeliberacao?: PosDeliberacao | null;
@@ -143,12 +144,12 @@ function pickFromSources(sources: any[], aliases: string[], { raw = false }: { r
 }
 
 /* ---------------------- Normalização de status ---------------------- */
-function canonicalStatus(input?: string | null): "Em análise" | "Concluído" | undefined {
+function canonicalPair(input?: string | null): { status?: "Em análise" | "Concluído"; code?: "em_analise" | "concluido" } {
   const s = (input || "").toString().trim().toLowerCase();
-  if (!s) return undefined;
-  if (/conclu[ií]d/.test(s)) return "Concluído";
-  if (/em[\s_]?an[aá]lis/.test(s)) return "Em análise";
-  return undefined;
+  if (!s) return {};
+  if (/conclu[ií]d/.test(s)) return { status: "Concluído", code: "concluido" };
+  if (/em[\s_]?an[aá]lis/.test(s)) return { status: "Em análise", code: "em_analise" };
+  return {};
 }
 
 /* ========================================================================== */
@@ -200,6 +201,7 @@ const AnalisePleitoPage: React.FC = () => {
             tituloSecao: params.get("tituloSecao") || "",
             tipoPleito: params.get("tipoPleito") || "",
             status: "Não iniciado",
+            statusCode: "nao_iniciado" as const,
             analise: null,
             updatedAt: serverTimestamp(),
             responsavelUid: u?.uid || "",
@@ -245,6 +247,7 @@ const AnalisePleitoPage: React.FC = () => {
           pautaId: v?.pautaId || "",
           pleitoKey: v?.pleitoKey || "",
           status: v?.status || "Não iniciado",
+          statusCode: v?.statusCode || "nao_iniciado",
           linhaPauta: v?.linhaPauta || null,
           analise: v?.analise || null,
           posDeliberacao: v?.posDeliberacao || null,
@@ -253,6 +256,7 @@ const AnalisePleitoPage: React.FC = () => {
         setPos(atrib.posDeliberacao || {});
 
         // init form
+        const ref2 = doc(db, "atribuicoes", atrId);
         if (copyFrom) {
           try {
             const src = await getDoc(doc(db, "atribuicoes", copyFrom));
@@ -267,7 +271,7 @@ const AnalisePleitoPage: React.FC = () => {
               setForm(copied);
               if (!hasContent(atrib.analise)) {
                 try {
-                  await updateDoc(ref, { analise: copied, updatedAt: serverTimestamp() });
+                  await updateDoc(ref2, { analise: copied, updatedAt: serverTimestamp() });
                 } catch {}
               }
             }
@@ -359,14 +363,13 @@ const AnalisePleitoPage: React.FC = () => {
   }, [atrId, copyFrom, isBlank]);
 
   /* ------------------------------ salvar análise ------------------------------ */
-  async function salvar(statusRaw?: string) {
+  async function salvar(statusWish?: string) {
     if (!atrId) return;
     setSalvando(true);
     try {
       const db = getFirestore();
 
-      // Normalização de status (aceita "concluido", "Concluído", etc.)
-      const normStatus = canonicalStatus(statusRaw);
+      const { status, code } = canonicalPair(statusWish);
       const payload: any = {
         analise: {
           resumo: form.resumo || "",
@@ -377,17 +380,27 @@ const AnalisePleitoPage: React.FC = () => {
         updatedAt: serverTimestamp(),
       };
 
-      if (normStatus === "Em análise") {
-        payload.status = "Em análise";
-      } else if (normStatus === "Concluído") {
-        payload.status = "Concluído";
-        payload.concludedAt = serverTimestamp();
+      if (status && code) {
+        payload.status = status;
+        payload.statusCode = code;
+        if (code === "concluido") payload.concludedAt = serverTimestamp();
       }
 
       await updateDoc(doc(db, "atribuicoes", atrId), payload);
-      toast.success(normStatus === "Concluído" ? "Análise concluída." : "Análise salva.");
+
+      // otimista no estado local
+      setAtr((prev) => prev ? { ...prev, status: payload.status ?? prev.status, statusCode: payload.statusCode ?? prev.statusCode } : prev);
+
+      toast.success(status === "Concluído" ? "Análise concluída." : "Análise salva.");
 
       try { await upsertHistoricoFromAtribuicao(db, atrId); } catch {}
+
+      // leve UX: ao concluir, voltar para minhas tarefas
+      if (code === "concluido") navigate("/minhas-tarefas");
+    } catch (err: any) {
+      console.error(err);
+      const msg = (err && (err.message || err.code)) ? String(err.message || err.code) : "Falha ao salvar.";
+      toast.error(msg);
     } finally {
       setSalvando(false);
     }
@@ -409,6 +422,9 @@ const AnalisePleitoPage: React.FC = () => {
         updatedAt: serverTimestamp(),
       });
       toast.success("Encaminhamento pós-deliberação salvo.");
+    } catch (err: any) {
+      console.error(err);
+      toast.error(err?.message || "Falha ao salvar encaminhamento.");
     } finally { setSalvando(false); }
   }
 
@@ -465,7 +481,6 @@ const AnalisePleitoPage: React.FC = () => {
       if (!v) return undefined;
       if (Array.isArray(v)) return v.map(String).filter(Boolean);
       const s = String(v || "").trim();
-      // aqui, para links, mantemos a string como veio (pode ser URL do SEI).
       return s ? [s] : undefined;
     };
 
