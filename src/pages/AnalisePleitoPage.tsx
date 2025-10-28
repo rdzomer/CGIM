@@ -1,11 +1,23 @@
 // src/pages/AnalisePleitoPage.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
-import { doc, getDoc, getFirestore, updateDoc, serverTimestamp, setDoc } from "firebase/firestore";
-import { getAuth } from "firebase/auth";
+import {
+  doc,
+  getDoc,
+  getFirestore,
+  updateDoc,
+  serverTimestamp,
+  setDoc,
+  deleteDoc,
+} from "firebase/firestore";
+import { getAuth, onAuthStateChanged, User } from "firebase/auth";
 import toast from "react-hot-toast";
 import { FileText } from "lucide-react";
-import { getHistoricoByPleitoKey, upsertHistoricoFromAtribuicao } from "../services/historicoAnalisesService";
+import {
+  getHistoricoByPleitoKey,
+  upsertHistoricoFromAtribuicao,
+} from "../services/historicoAnalisesService";
+import { makeAtribuicaoId } from "../services/atribuicoesService";
 
 /* ----------------------------- Tipos ----------------------------- */
 type Analise = { resumo?: string; comercio?: string; tecnica?: string; sugestao?: string };
@@ -29,6 +41,16 @@ type Atrib = {
   analise?: Analise | null;
   linhaPauta?: any;
   posDeliberacao?: PosDeliberacao | null;
+
+  // metadados do analista
+  analistaUid?: string;
+  analistaEmail?: string;
+  analistaNome?: string;
+
+  // timestamps
+  updatedAt?: any;
+  createdAt?: any;
+  concludedAt?: any;
 };
 
 type PedidoExtraido = {
@@ -61,7 +83,13 @@ const fmtNCM = (s?: string) => {
 const HIDDEN_KEYS = /(key|pleitokey|__sec|_id|id|timestamp|created|updated|hash|vers[aã]o|revindex)/i;
 
 const hasContent = (a?: Analise | null) =>
-  !!(a && ((norm(a.resumo).length > 0) || (norm(a.comercio).length > 0) || (norm(a.tecnica).length > 0) || (norm(a.sugestao).length > 0)));
+  !!(
+    a &&
+    (norm(a.resumo).length > 0 ||
+      norm(a.comercio).length > 0 ||
+      norm(a.tecnica).length > 0 ||
+      norm(a.sugestao).length > 0)
+  );
 
 /** Extrai todos os números SEI de uma string/array. */
 function normalizeSeiList(value?: string | string[]): string[] {
@@ -152,6 +180,16 @@ function canonicalPair(input?: string | null): { status?: "Em análise" | "Concl
   return {};
 }
 
+/* ------------------------ Auth mini hook ------------------------ */
+function useCurrentUser() {
+  const [state, setState] = useState<{ loading: boolean; user: User | null }>({ loading: true, user: null });
+  useEffect(() => {
+    const unsub = onAuthStateChanged(getAuth(), (u) => setState({ loading: false, user: u }));
+    return () => unsub();
+  }, []);
+  return state;
+}
+
 /* ========================================================================== */
 
 const AnalisePleitoPage: React.FC = () => {
@@ -159,10 +197,29 @@ const AnalisePleitoPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const params = new URLSearchParams(location.search);
+  const db = getFirestore();
+
+  const { loading: authLoading, user } = useCurrentUser();
 
   const copyFrom = params.get("copyFrom") || "";
   const isBlank = ["1", "true", "yes", "on"].includes((params.get("blank") || "").toLowerCase());
 
+  // Metadados vindos por querystring (quando abre pela Minhas Tarefas)
+  const pautaIdQS = params.get("pautaId") || "";
+  const pleitoKeyQS = params.get("pleitoKey") || "";
+  const ncmQS = params.get("ncm") || "";
+  const produtoQS = params.get("produto") || "";
+  const pleiteanteQS = params.get("pleiteante") || "";
+  const tipoPleitoQS = params.get("tipoPleito") || "";
+  const tituloSecaoQS = params.get("tituloSecao") || "";
+
+  // **ID CORRETO**: único por pleitoKey (independe de pauta/retificadora)
+  const targetDocId = useMemo(
+    () => (pleitoKeyQS ? makeAtribuicaoId(`${pleitoKeyQS}`) : (atrId ? atrId : "")),
+    [pleitoKeyQS, atrId]
+  );
+
+  // estados
   const [atr, setAtr] = useState<Atrib | null>(null);
   const [ficha, setFicha] = useState<Record<string, string>>({});
   const [pedido, setPedido] = useState<PedidoExtraido>({});
@@ -177,199 +234,245 @@ const AnalisePleitoPage: React.FC = () => {
 
   const [copiedSei, setCopiedSei] = useState<string | null>(null);
 
+  const [prevIdMigrated, setPrevIdMigrated] = useState<string | null>(null);
+  const [isRetificadora, setIsRetificadora] = useState<boolean>(false);
+
   /* --------------------------- Carregar atribuição --------------------------- */
-  useEffect(() => {
-    (async () => {
-      if (!atrId) return;
-      setCarregando(true);
-      try {
-        const db = getFirestore();
-        const ref = doc(db, "atribuicoes", atrId);
-        const snap = await getDoc(ref);
-        let v: any = null;
-
-        if (!snap.exists()) {
-          // Seed com responsável (auth atual) para satisfazer regras
-          const auth = getAuth();
-          const u = auth.currentUser;
-          const seed = {
-            pautaId: params.get("pautaId") || "",
-            pleitoKey: params.get("pleitoKey") || "",
-            ncm: params.get("ncm") || "",
-            produto: params.get("produto") || "",
-            pleiteante: params.get("pleiteante") || "",
-            tituloSecao: params.get("tituloSecao") || "",
-            tipoPleito: params.get("tipoPleito") || "",
-            status: "Não iniciado",
-            statusCode: "nao_iniciado" as const,
-            analise: null,
-            updatedAt: serverTimestamp(),
-            responsavelUid: u?.uid || "",
-            responsavelEmail: u?.email?.toLowerCase() || "",
-            responsavelNome: u?.displayName || "",
-            assigneeKeys: Array.from(
-              new Set(
-                [
-                  u?.uid,
-                  u?.email?.toLowerCase(),
-                  ...(u?.email ? u.email.split("@")[0].split(/[.\-_]/).filter(Boolean) : []),
-                  u?.displayName,
-                ]
-                  .map((x) => (x ? String(x).trim() : ""))
-                  .filter(Boolean)
-              )
-            ),
-          };
-          const hasSeed = Object.values({
-            pautaId: seed.pautaId, pleitoKey: seed.pleitoKey, ncm: seed.ncm,
-            produto: seed.produto, pleiteante: seed.pleiteante, tituloSecao: seed.tituloSecao, tipoPleito: seed.tipoPleito,
-          }).some(Boolean);
-
-          if (isBlank || hasSeed) {
-            await setDoc(ref, seed, { merge: true });
-            v = seed;
-          } else {
-            toast.error("Atribuição não encontrada.");
-            navigate("/minhas-tarefas");
-            return;
-          }
-        } else {
-          v = snap.data() as any;
-        }
-
-        const atrib: Atrib = {
-          id: atrId,
-          ncm: v?.ncm || "",
-          produto: v?.produto || "",
-          pleiteante: v?.pleiteante || "",
-          tipoPleito: v?.tipoPleito || "",
-          tituloSecao: v?.tituloSecao || "",
-          pautaId: v?.pautaId || "",
-          pleitoKey: v?.pleitoKey || "",
-          status: v?.status || "Não iniciado",
-          statusCode: v?.statusCode || "nao_iniciado",
-          linhaPauta: v?.linhaPauta || null,
-          analise: v?.analise || null,
-          posDeliberacao: v?.posDeliberacao || null,
-        };
-        setAtr(atrib);
-        setPos(atrib.posDeliberacao || {});
-
-        // init form
-        const ref2 = doc(db, "atribuicoes", atrId);
-        if (copyFrom) {
-          try {
-            const src = await getDoc(doc(db, "atribuicoes", copyFrom));
-            if (src.exists()) {
-              const sd: any = src.data();
-              const copied: Analise = {
-                resumo: sd?.analise?.resumo || "",
-                comercio: sd?.analise?.comercio || "",
-                tecnica: sd?.analise?.tecnica || "",
-                sugestao: sd?.analise?.sugestao || "",
-              };
-              setForm(copied);
-              if (!hasContent(atrib.analise)) {
-                try {
-                  await updateDoc(ref2, { analise: copied, updatedAt: serverTimestamp() });
-                } catch {}
-              }
-            }
-          } catch {}
-        } else if (isBlank) {
-          setForm({ resumo: "", comercio: "", tecnica: "", sugestao: "" });
-          setDraft(null);
-          setDraftLoadedFrom(null);
-        } else {
-          setForm(atrib.analise || {});
-          try {
-            if (!hasContent(atrib.analise) && (atrib?.pleitoKey || v?.pleitoKey)) {
-              const hist = await getHistoricoByPleitoKey(db, (atrib?.pleitoKey || v?.pleitoKey)!);
-              if (hist && (hist.ultimoResumo || hist.ultimoComercio || hist.ultimaTecnica || hist.ultimaSugestao)) {
-                setDraft({
-                  resumo: hist.ultimoResumo || "",
-                  comercio: hist.ultimoComercio || "",
-                  tecnica: hist.ultimaTecnica || "",
-                  sugestao: hist.ultimaSugestao || "",
-                });
-                setDraftLoadedFrom("histórico");
-              }
-            }
-          } catch {}
-        }
-
-        // ficha/pedido a partir da linha
-        const base: any = v?.linhaPauta || {};
-        const fichaLocal: Record<string, string> = {};
-        Object.entries(base).forEach(([k, val]) => {
-          const keyLower = k.toLowerCase();
-          if (HIDDEN_KEYS.test(keyLower)) return;
-          const str = String(val ?? "").trim();
-          if (!str) return;
-          fichaLocal[mapHeader(k)] = str;
-        });
-        setFicha(fichaLocal);
-
-        // tenta doc do pleito
-        let pleitoDocData: any = null;
+  const hydrate = useCallback(async () => {
+    if (authLoading) return;
+    setCarregando(true);
+    try {
+      // Detecta retificadora (se pauta disponível)
+      if (pautaIdQS) {
         try {
-          const pk = atrib.pleitoKey || v?.pleitoKey;
-          if (pk) {
-            const ps = await getDoc(doc(db, "pleitos", pk));
-            if (ps.exists()) pleitoDocData = ps.data();
+          const pautaDoc = await getDoc(doc(db, "pautas", pautaIdQS));
+          const pdata: any = pautaDoc.exists() ? pautaDoc.data() : null;
+          const retFlag = !!(pdata?.diffResumo?.baseId || pdata?.isRetificadora);
+          setIsRetificadora(retFlag);
+        } catch { setIsRetificadora(false); }
+      }
+
+      let loaded: Atrib | null = null;
+
+      // 1) Se temos targetDocId, tenta carregar por ele (modelo novo)
+      if (targetDocId) {
+        const snapNew = await getDoc(doc(db, "atribuicoes", targetDocId));
+        if (snapNew.exists()) {
+          const v = snapNew.data() as any;
+          loaded = {
+            id: targetDocId,
+            ncm: v?.ncm || ncmQS || "",
+            produto: v?.produto || produtoQS || "",
+            pleiteante: v?.pleiteante || pleiteanteQS || "",
+            tipoPleito: v?.tipoPleito || tipoPleitoQS || "",
+            tituloSecao: v?.tituloSecao || tituloSecaoQS || "",
+            pautaId: v?.pautaId || pautaIdQS || "",
+            pleitoKey: v?.pleitoKey || pleitoKeyQS || "",
+            status: v?.status || "Não iniciado",
+            statusCode: v?.statusCode || "nao_iniciado",
+            linhaPauta: v?.linhaPauta || null,
+            analise: v?.analise || null,
+            posDeliberacao: v?.posDeliberacao || null,
+            analistaUid: v?.analistaUid,
+            analistaEmail: v?.analistaEmail,
+            analistaNome: v?.analistaNome,
+            updatedAt: v?.updatedAt,
+            createdAt: v?.createdAt,
+            concludedAt: v?.concludedAt,
+          };
+        }
+      }
+
+      // 2) Se veio com atrId antigo E (ainda) não temos o doc novo, carrega o antigo
+      if (!loaded && atrId && atrId !== targetDocId) {
+        const legacySnap = await getDoc(doc(db, "atribuicoes", atrId));
+        if (legacySnap.exists()) {
+          const v = legacySnap.data() as any;
+          loaded = {
+            id: atrId,
+            ncm: v?.ncm || ncmQS || "",
+            produto: v?.produto || produtoQS || "",
+            pleiteante: v?.pleiteante || pleiteanteQS || "",
+            tipoPleito: v?.tipoPleito || tipoPleitoQS || "",
+            tituloSecao: v?.tituloSecao || tituloSecaoQS || "",
+            pautaId: v?.pautaId || pautaIdQS || "",
+            pleitoKey: v?.pleitoKey || pleitoKeyQS || "",
+            status: v?.status || "Não iniciado",
+            statusCode: v?.statusCode || "nao_iniciado",
+            linhaPauta: v?.linhaPauta || null,
+            analise: v?.analise || null,
+            posDeliberacao: v?.posDeliberacao || null,
+            analistaUid: v?.analistaUid,
+            analistaEmail: v?.analistaEmail,
+            analistaNome: v?.analistaNome,
+            updatedAt: v?.updatedAt,
+            createdAt: v?.createdAt,
+            concludedAt: v?.concludedAt,
+          };
+        }
+      }
+
+      // 3) Se copyFrom foi solicitado e pediram em branco, carrega origem e ignora o que veio
+      if ((!loaded || isBlank) && copyFrom) {
+        try {
+          const s = await getDoc(doc(db, "atribuicoes", copyFrom));
+          if (s.exists()) {
+            const sd: any = s.data();
+            const copied: Analise = {
+              resumo: sd?.analise?.resumo || "",
+              comercio: sd?.analise?.comercio || "",
+              tecnica: sd?.analise?.tecnica || "",
+              sugestao: sd?.analise?.sugestao || "",
+            };
+            setForm(copied);
           }
         } catch {}
-
-        // pedido primário (linha + doc pleito)
-        let pedidoLocal = extrairPedidoAmplo(base, pleitoDocData);
-        setPedido(pedidoLocal);
-
-        // fallback por pauta para processo SEI
-        if ((!pedidoLocal?.processoSei || (Array.isArray(pedidoLocal.processoSei) && pedidoLocal.processoSei.length === 0)) && atrib.pautaId) {
-          try {
-            const pautaSnap = await getDoc(doc(db, "pautas", atrib.pautaId));
-            if (pautaSnap.exists()) {
-              const pauta = pautaSnap.data();
-              const rows = flattenPauta(pauta);
-              const alvo = rows.find(({ row }) => {
-                const keyRow = gerarPleitoKeyFromRow(row);
-                const byKey = atrib.pleitoKey && norm(keyRow) === norm(atrib.pleitoKey);
-                const { ncm, produto } = projectLinha(row);
-                const byPair =
-                  only8(ncm) === only8(atrib.ncm) &&
-                  normKey(produto) === normKey(atrib.produto);
-                return byKey || byPair;
-              })?.row;
-
-              if (alvo) {
-                const pedidoDoAlvo = extrairPedidoAmplo(alvo, undefined);
-                pedidoLocal = {
-                  ...pedidoLocal,
-                  processoSei: normalizeSeiList(pedidoLocal.processoSei as any).length
-                    ? pedidoLocal.processoSei
-                    : pedidoDoAlvo.processoSei,
-                  processoSeiLinks: (pedidoLocal.processoSeiLinks?.length ? pedidoLocal.processoSeiLinks : pedidoDoAlvo.processoSeiLinks) as any,
-                };
-                setPedido(pedidoLocal);
-              }
-            }
-          } catch {}
-        }
-      } finally {
-        setCarregando(false);
+      } else if (loaded?.analise) {
+        setForm({
+          resumo: loaded.analise?.resumo || "",
+          comercio: loaded.analise?.comercio || "",
+          tecnica: loaded.analise?.tecnica || "",
+          sugestao: loaded.analise?.sugestao || "",
+        });
       }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [atrId, copyFrom, isBlank]);
+
+      // 4) Se ainda não carregou nada, cria um objeto base (sem gravar) para UI
+      if (!loaded) {
+        loaded = {
+          id: targetDocId || (atrId || "novo"),
+          ncm: ncmQS || "",
+          produto: produtoQS || "",
+          pleiteante: pleiteanteQS || "",
+          tipoPleito: tipoPleitoQS || "",
+          tituloSecao: tituloSecaoQS || "",
+          pautaId: pautaIdQS || "",
+          pleitoKey: pleitoKeyQS || "",
+          status: "Não iniciado",
+          statusCode: "nao_iniciado",
+          analise: null,
+          posDeliberacao: null,
+        };
+      }
+      setAtr(loaded);
+
+      // 5) Rascunho via histórico (se não há análise carregada)
+      try {
+        if (!hasContent(loaded.analise) && (loaded?.pleitoKey || pleitoKeyQS)) {
+          const hist = await getHistoricoByPleitoKey(db, (loaded?.pleitoKey || pleitoKeyQS)!);
+          if (hist && (hist.ultimoResumo || hist.ultimoComercio || hist.ultimaTecnica || hist.ultimaSugestao)) {
+            setDraft({
+              resumo: hist.ultimoResumo || "",
+              comercio: hist.ultimoComercio || "",
+              tecnica: hist.ultimaTecnica || "",
+              sugestao: hist.ultimaSugestao || "",
+            });
+            setDraftLoadedFrom("histórico");
+          }
+        }
+      } catch {}
+
+      // 6) Monta ficha a partir da linha da pauta
+      const base: any = (loaded as any)?.linhaPauta || {};
+      const fichaLocal: Record<string, string> = {};
+      Object.entries(base).forEach(([k, val]) => {
+        const keyLower = k.toLowerCase();
+        if (HIDDEN_KEYS.test(keyLower)) return;
+        const str = String(val ?? "").trim();
+        if (!str) return;
+        fichaLocal[mapHeader(k)] = str;
+      });
+      setFicha(fichaLocal);
+
+      // 7) tenta doc do pleito
+      let pleitoDocData: any = null;
+      try {
+        const pk = loaded.pleitoKey || pleitoKeyQS;
+        if (pk) {
+          const ps = await getDoc(doc(db, "pleitos", pk));
+          if (ps.exists()) pleitoDocData = ps.data();
+        }
+      } catch {}
+
+      // 8) pedido primário (linha + doc pleito)
+      let pedidoLocal = extrairPedidoAmplo(base, pleitoDocData);
+      setPedido(pedidoLocal);
+
+      // 9) fallback por pauta para processo SEI
+      if ((!pedidoLocal?.processoSei || (Array.isArray(pedidoLocal.processoSei) && pedidoLocal.processoSei.length === 0)) && loaded.pautaId) {
+        try {
+          const pautaSnap = await getDoc(doc(db, "pautas", loaded.pautaId));
+          if (pautaSnap.exists()) {
+            const pauta = pautaSnap.data();
+            const rows = flattenPauta(pauta);
+            const alvo = rows.find(({ row }) => {
+              const keyRow = gerarPleitoKeyFromRow(row);
+              const byKey = loaded.pleitoKey && norm(keyRow) === norm(loaded.pleitoKey);
+              const { ncm, produto } = projectLinha(row);
+              const byPair =
+                only8(ncm) === only8(loaded.ncm) &&
+                normKey(produto) === normKey(loaded.produto);
+              return byKey || byPair;
+            })?.row;
+
+            if (alvo) {
+              const pedidoDoAlvo = extrairPedidoAmplo(alvo, undefined);
+              pedidoLocal = {
+                ...pedidoLocal,
+                processoSei: normalizeSeiList(pedidoLocal.processoSei as any).length
+                  ? pedidoLocal.processoSei
+                  : pedidoDoAlvo.processoSei,
+                processoSeiLinks: (pedidoLocal.processoSeiLinks?.length ? pedidoLocal.processoSeiLinks : pedidoDoAlvo.processoSeiLinks) as any,
+              };
+              setPedido(pedidoLocal);
+            }
+          }
+        } catch {}
+      }
+
+      // 10) Se abrimos com atrId legado e não existia targetDocId, migra para o novo
+      if (atrId && targetDocId && atrId !== targetDocId) {
+        const legacySnap = await getDoc(doc(db, "atribuicoes", atrId));
+        const targetSnap = await getDoc(doc(db, "atribuicoes", targetDocId));
+        if (legacySnap.exists() && !targetSnap.exists()) {
+          const legacy = legacySnap.data();
+          await setDoc(
+            doc(db, "atribuicoes", targetDocId),
+            {
+              ...legacy,
+              id: targetDocId,
+              pautaId: loaded.pautaId || pautaIdQS,
+              pleitoKey: loaded.pleitoKey || pleitoKeyQS,
+              ncm: loaded.ncm || ncmQS,
+              produto: loaded.produto || produtoQS,
+              pleiteante: loaded.pleiteante || pleiteanteQS,
+              tipoPleito: loaded.tipoPleito || tipoPleitoQS,
+              tituloSecao: loaded.tituloSecao || tituloSecaoQS,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+          setPrevIdMigrated(atrId);
+        }
+      }
+    } finally {
+      setCarregando(false);
+    }
+  }, [authLoading, db, atrId, targetDocId, pautaIdQS, pleitoKeyQS, ncmQS, produtoQS, tipoPleitoQS, pleiteanteQS, tituloSecaoQS, copyFrom, isBlank]);
+
+  useEffect(() => {
+    hydrate();
+  }, [hydrate]);
 
   /* ------------------------------ salvar análise ------------------------------ */
   async function salvar(statusWish?: string) {
-    if (!atrId) return;
+    if (!targetDocId || !pleitoKeyQS) {
+      toast.error("pleitoKey ausente. Volte para Minhas Tarefas e reabra o item.");
+      return;
+    }
     setSalvando(true);
     try {
-      const db = getFirestore();
-
       const { status, code } = canonicalPair(statusWish);
+
       const payload: any = {
         analise: {
           resumo: form.resumo || "",
@@ -377,8 +480,22 @@ const AnalisePleitoPage: React.FC = () => {
           tecnica: form.tecnica || "",
           sugestao: form.sugestao || "",
         },
+        // metadados da URL (sempre atualizados)
+        pautaId: atr?.pautaId || pautaIdQS || "",
+        pleitoKey: atr?.pleitoKey || pleitoKeyQS || "",
+        ncm: atr?.ncm || ncmQS || "",
+        produto: atr?.produto || produtoQS || "",
+        pleiteante: atr?.pleiteante || pleiteanteQS || "",
+        tipoPleito: atr?.tipoPleito || tipoPleitoQS || "",
+        tituloSecao: atr?.tituloSecao || tituloSecaoQS || "",
         updatedAt: serverTimestamp(),
       };
+
+      if (user) {
+        payload.analistaUid = user.uid;
+        payload.analistaEmail = user.email?.toLowerCase();
+        payload.analistaNome = user.displayName || "";
+      }
 
       if (status && code) {
         payload.status = status;
@@ -386,17 +503,31 @@ const AnalisePleitoPage: React.FC = () => {
         if (code === "concluido") payload.concludedAt = serverTimestamp();
       }
 
-      await updateDoc(doc(db, "atribuicoes", atrId), payload);
+      // **SALVAR SEMPRE NO DOC-ID ÚNICO (pleitoKey)**
+      await setDoc(doc(db, "atribuicoes", targetDocId), payload, { merge: true });
 
-      // otimista no estado local
-      setAtr((prev) => prev ? { ...prev, status: payload.status ?? prev.status, statusCode: payload.statusCode ?? prev.statusCode } : prev);
+      // Se migramos de um ID antigo, remove o legado
+      if (prevIdMigrated && prevIdMigrated !== targetDocId) {
+        try { await deleteDoc(doc(db, "atribuicoes", prevIdMigrated)); } catch {}
+      }
+
+      // Estado local
+      setAtr((prev) =>
+        prev
+          ? {
+              ...prev,
+              ...payload,
+            }
+          : ({ id: targetDocId, ...payload } as Atrib)
+      );
+
+      // Histórico
+      try { await upsertHistoricoFromAtribuicao(db, targetDocId); } catch {}
 
       toast.success(status === "Concluído" ? "Análise concluída." : "Análise salva.");
 
-      try { await upsertHistoricoFromAtribuicao(db, atrId); } catch {}
-
-      // leve UX: ao concluir, voltar para minhas tarefas
-      if (code === "concluido") navigate("/minhas-tarefas");
+      // UX: ao concluir, voltar para minhas tarefas
+      if (status === "Concluído") navigate("/minhas-tarefas");
     } catch (err: any) {
       console.error(err);
       const msg = (err && (err.message || err.code)) ? String(err.message || err.code) : "Falha ao salvar.";
@@ -408,19 +539,22 @@ const AnalisePleitoPage: React.FC = () => {
 
   /* --------------------------- salvar pós-deliberação -------------------------- */
   async function salvarPosDeliberacao() {
-    if (!atrId) return;
+    if (!targetDocId) return;
     setSalvando(true);
     try {
-      const db = getFirestore();
-      await updateDoc(doc(db, "atribuicoes", atrId), {
-        posDeliberacao: {
-          data: pos.data || "",
-          resultado: pos.resultado || "",
-          encaminhamento: pos.encaminhamento || "",
-          numeroAta: pos.numeroAta || "",
+      await setDoc(
+        doc(db, "atribuicoes", targetDocId),
+        {
+          posDeliberacao: {
+            data: pos.data || "",
+            resultado: pos.resultado || "",
+            encaminhamento: pos.encaminhamento || "",
+            numeroAta: pos.numeroAta || "",
+          },
+          updatedAt: serverTimestamp(),
         },
-        updatedAt: serverTimestamp(),
-      });
+        { merge: true }
+      );
       toast.success("Encaminhamento pós-deliberação salvo.");
     } catch (err: any) {
       console.error(err);
@@ -533,6 +667,16 @@ const AnalisePleitoPage: React.FC = () => {
 
   return (
     <div className="w-full p-6 space-y-6">
+      {/* Aviso de retificadora */}
+      {isRetificadora && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900">
+          <div className="font-medium">Retificação detectada</div>
+          <div className="text-sm mt-1">
+            Esta análise será salva no <strong>mesmo registro do pleito (ID único por pleitoKey)</strong>, garantindo reaproveitamento automático entre versões da pauta.
+          </div>
+        </div>
+      )}
+
       {showDraftBanner && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900">
           <div className="font-medium">
@@ -567,26 +711,40 @@ const AnalisePleitoPage: React.FC = () => {
       <section className="rounded-xl border bg-white/70 p-4">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <div className="text-sm text-gray-500">Seção: <span className="font-medium">{atr.tituloSecao || "—"}</span></div>
-            <h1 className="mt-1 text-xl font-semibold">{fmtNCM(atr.ncm)} — {atr.produto || "Produto não identificado"}</h1>
-            <div className="text-sm text-gray-600 mt-1"><span className="font-medium">Pleiteante:</span> {atr.pleiteante || "—"}</div>
+            <div className="text-sm text-gray-500">
+              Seção: <span className="font-medium">{atr.tituloSecao || tituloSecaoQS || "—"}</span>
+            </div>
+            <h1 className="mt-1 text-xl font-semibold">
+              {fmtNCM(atr.ncm || ncmQS)} — {atr.produto || produtoQS || "Produto não identificado"}
+            </h1>
+            <div className="text-sm text-gray-600 mt-1">
+              <span className="font-medium">Pleiteante:</span> {atr.pleiteante || pleiteanteQS || "—"}
+            </div>
           </div>
 
           <div className="flex flex-wrap gap-2">
             <button
               className="px-4 py-2.5 rounded-xl border hover:bg-gray-50"
               onClick={() =>
-                atr.pautaId
-                  ? window.open(`/pauta/${encodeURIComponent(atr.pautaId)}?secao=${encodeURIComponent(atr.tituloSecao || "")}`, "_blank")
+                (atr.pautaId || pautaIdQS)
+                  ? window.open(`/pauta/${encodeURIComponent(atr.pautaId || pautaIdQS)}?secao=${encodeURIComponent(atr.tituloSecao || tituloSecaoQS || "")}`, "_blank")
                   : toast.error("Pauta sem ID.")
               }
             >
               Abrir pauta
             </button>
-            <button className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700" disabled={salvando} onClick={() => salvar("Em análise")}>
+            <button
+              className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
+              disabled={salvando}
+              onClick={() => salvar("Em análise")}
+            >
               Salvar análise
             </button>
-            <button className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700" disabled={salvando} onClick={() => salvar("Concluído")}>
+            <button
+              className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700"
+              disabled={salvando}
+              onClick={() => salvar("Concluído")}
+            >
               Concluir
             </button>
           </div>
@@ -601,14 +759,14 @@ const AnalisePleitoPage: React.FC = () => {
         </div>
 
         <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Info label="NCM" value={fmtNCM(atr.ncm)} />
-          <Info label="Tipo de Pleito" value={atr.tipoPleito || "—"} />
-          <Info label="Produto (pleito)" value={atr.produto || "—"} className="md:col-span-2" />
-          <Info label="Pleiteante" value={atr.pleiteante || "—"} className="md:col-span-2" />
+          <Info label="NCM" value={fmtNCM(atr.ncm || ncmQS)} />
+          <Info label="Tipo de Pleito" value={atr.tipoPleito || tipoPleitoQS || "—"} />
+          <Info label="Produto (pleito)" value={atr.produto || produtoQS || "—"} className="md:col-span-2" />
+          <Info label="Pleiteante" value={atr.pleiteante || pleiteanteQS || "—"} className="md:col-span-2" />
         </div>
 
         {/* ===== Dados resumidos (com Processo SEI em destaque) ===== */}
-        {(Object.keys(pedido || {}).length > 0) && (
+        {Object.keys(pedido || {}).length > 0 && (
           <>
             <div className="mt-5 text-sm text-gray-500">Dados resumidos</div>
 
