@@ -47,6 +47,11 @@ type Atrib = {
   analistaEmail?: string;
   analistaNome?: string;
 
+  // aliases compatíveis com MinhasTarefas (algumas versões usam "responsavel*")
+  responsavelUid?: string | null;
+  responsavelEmail?: string | null;
+  responsavelNome?: string | null;
+
   // timestamps
   updatedAt?: any;
   createdAt?: any;
@@ -276,6 +281,9 @@ const AnalisePleitoPage: React.FC = () => {
             analistaUid: v?.analistaUid,
             analistaEmail: v?.analistaEmail,
             analistaNome: v?.analistaNome,
+            responsavelUid: v?.responsavelUid ?? v?.analistaUid ?? null,
+            responsavelEmail: v?.responsavelEmail ?? v?.analistaEmail ?? null,
+            responsavelNome: v?.responsavelNome ?? v?.analistaNome ?? null,
             updatedAt: v?.updatedAt,
             createdAt: v?.createdAt,
             concludedAt: v?.concludedAt,
@@ -305,6 +313,9 @@ const AnalisePleitoPage: React.FC = () => {
             analistaUid: v?.analistaUid,
             analistaEmail: v?.analistaEmail,
             analistaNome: v?.analistaNome,
+            responsavelUid: v?.responsavelUid ?? v?.analistaUid ?? null,
+            responsavelEmail: v?.responsavelEmail ?? v?.analistaEmail ?? null,
+            responsavelNome: v?.responsavelNome ?? v?.analistaNome ?? null,
             updatedAt: v?.updatedAt,
             createdAt: v?.createdAt,
             concludedAt: v?.concludedAt,
@@ -480,8 +491,8 @@ const AnalisePleitoPage: React.FC = () => {
           tecnica: form.tecnica || "",
           sugestao: form.sugestao || "",
         },
-        // metadados da URL (sempre atualizados)
-        pautaId: atr?.pautaId || pautaIdQS || "",
+        // metadados da URL (sempre atualizados; **preferir a pauta da QS**)
+        pautaId: pautaIdQS || atr?.pautaId || "",
         pleitoKey: atr?.pleitoKey || pleitoKeyQS || "",
         ncm: atr?.ncm || ncmQS || "",
         produto: atr?.produto || produtoQS || "",
@@ -495,6 +506,11 @@ const AnalisePleitoPage: React.FC = () => {
         payload.analistaUid = user.uid;
         payload.analistaEmail = user.email?.toLowerCase();
         payload.analistaNome = user.displayName || "";
+
+        // **Aliases compatíveis com páginas antigas**
+        payload.responsavelUid = user.uid;
+        payload.responsavelEmail = (user.email || "").toLowerCase();
+        payload.responsavelNome = user.displayName || "";
       }
 
       if (status && code) {
@@ -515,6 +531,19 @@ const AnalisePleitoPage: React.FC = () => {
           updatedAt: serverTimestamp(),
           concludedAt: payload.concludedAt ?? null,
           redirectTo: targetDocId,
+          pautaId: payload.pautaId,
+          pleitoKey: payload.pleitoKey,
+          ncm: payload.ncm,
+          produto: payload.produto,
+          pleiteante: payload.pleiteante,
+          tipoPleito: payload.tipoPleito,
+          tituloSecao: payload.tituloSecao,
+          analistaUid: payload.analistaUid,
+          analistaEmail: payload.analistaEmail,
+          analistaNome: payload.analistaNome,
+          responsavelUid: payload.responsavelUid,
+          responsavelEmail: payload.responsavelEmail,
+          responsavelNome: payload.responsavelNome,
         };
         try {
           await setDoc(doc(db, "atribuicoes", atrId), mirror, { merge: true });
