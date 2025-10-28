@@ -312,7 +312,7 @@ const AnalisePleitoPage: React.FC = () => {
         }
       }
 
-      // 3) Se copyFrom foi solicitado e pediram em branco, carrega origem e ignora o que veio
+      // 3) Reaproveitamento de análise (copyFrom) — se requisitado
       if ((!loaded || isBlank) && copyFrom) {
         try {
           const s = await getDoc(doc(db, "atribuicoes", copyFrom));
@@ -503,10 +503,28 @@ const AnalisePleitoPage: React.FC = () => {
         if (code === "concluido") payload.concludedAt = serverTimestamp();
       }
 
-      // **SALVAR SEMPRE NO DOC-ID ÚNICO (pleitoKey)**
+      // **1) SALVAR NO DOC-ID ÚNICO (pleitoKey)**
       await setDoc(doc(db, "atribuicoes", targetDocId), payload, { merge: true });
 
-      // Se migramos de um ID antigo, remove o legado
+      // **2) ESPELHAR NO DOC LEGADO (atrId), SE EXISTIR E FOR DIFERENTE**
+      if (atrId && atrId !== targetDocId) {
+        const mirror: any = {
+          analise: payload.analise,
+          status: payload.status,
+          statusCode: payload.statusCode,
+          updatedAt: serverTimestamp(),
+          concludedAt: payload.concludedAt ?? null,
+          redirectTo: targetDocId,
+        };
+        try {
+          await setDoc(doc(db, "atribuicoes", atrId), mirror, { merge: true });
+        } catch (e) {
+          // não impedir a conclusão se der erro no espelho
+          console.warn("Falha ao espelhar no doc legado:", e);
+        }
+      }
+
+      // Se migramos anteriormente, opcionalmente remover o legado:
       if (prevIdMigrated && prevIdMigrated !== targetDocId) {
         try { await deleteDoc(doc(db, "atribuicoes", prevIdMigrated)); } catch {}
       }
@@ -555,6 +573,25 @@ const AnalisePleitoPage: React.FC = () => {
         },
         { merge: true }
       );
+
+      // Espelhar no legado também
+      if (atrId && atrId !== targetDocId) {
+        await setDoc(
+          doc(db, "atribuicoes", atrId),
+          {
+            posDeliberacao: {
+              data: pos.data || "",
+              resultado: pos.resultado || "",
+              encaminhamento: pos.encaminhamento || "",
+              numeroAta: pos.numeroAta || "",
+            },
+            updatedAt: serverTimestamp(),
+            redirectTo: targetDocId,
+          },
+          { merge: true }
+        );
+      }
+
       toast.success("Encaminhamento pós-deliberação salvo.");
     } catch (err: any) {
       console.error(err);
@@ -871,7 +908,7 @@ const AnalisePleitoPage: React.FC = () => {
             </select>
           </div>
 
-          <div className="md:col-span-2">
+        <div className="md:col-span-2">
             <label className="text-sm text-gray-600">Encaminhamento / Observações</label>
             <textarea className="mt-1 w-full rounded border px-3 py-2" rows={4} value={pos.encaminhamento || ""} onChange={(e) => setPos((p) => ({ ...p, encaminhamento: e.target.value }))} placeholder="Descreva detalhes do encaminhamento, observações, etc." />
           </div>
