@@ -307,7 +307,7 @@ async function computeVersionNumbers(_db: any, list: PautaDoc[]): Promise<Map<st
   }
 
   const byBaseName: Record<string, PautaDoc[]> = {};
-  for (const p of list) (byBaseName[baseNameForGrouping(p)] = byBaseName[baseNameForGrouping(p)] || []).push(p);
+  for (const p of list) (byBaseName[baseNameForGrouping(p)] = byBaseNameForGrouping(p)] || []).push(p);
   for (const arr of Object.values(byBaseName)) {
     const sorted = [...arr].sort((a, b) => uploadTs(a) - uploadTs(b));
     let v = 1;
@@ -637,24 +637,33 @@ const MinhasTarefasPage: React.FC = () => {
 
         const mineScoped = mine.filter((a) => (a.pautaId || "") === pautaId);
 
+        // ===== DEDUP CORRIGIDO: prioriza status 'concluído' > 'em_analise' > 'nao_iniciado' e só depois updatedAt =====
+        const statusRank = (s?: string) => {
+          const n = normalizeStatus(s);
+          if (n === "concluido") return 3;
+          if (n === "em_analise") return 2;
+          return 1; // nao_iniciado
+        };
+
         const byScopedKey = new Map<string, Atribuicao>();
         for (const a of mineScoped) {
           const ncm8 = onlyDigits(a.ncm).slice(0, 8);
           const produtoNk = normKey(a.produto || "");
           const scopedKey = `${norm(a.pautaId)}|${norm(a.pleitoKey) || `${ncm8}|${produtoNk}`}`;
           const prev = byScopedKey.get(scopedKey);
-          if (!prev) byScopedKey.set(scopedKey, a);
-          else {
-            const pick =
-              toMillis(a.updatedAt) > toMillis(prev.updatedAt)
-                ? a
-                : toMillis(a.updatedAt) < toMillis(prev.updatedAt)
-                ? prev
-                : a.produto
-                ? a
-                : prev;
-            byScopedKey.set(scopedKey, pick);
+          if (!prev) {
+            byScopedKey.set(scopedKey, a);
+            continue;
           }
+          let pick = prev;
+          const rA = statusRank(a.status);
+          const rP = statusRank(prev.status);
+          if (rA > rP) pick = a;
+          else if (rA < rP) pick = prev;
+          else if (toMillis(a.updatedAt) > toMillis(prev.updatedAt)) pick = a;
+          else if (toMillis(a.updatedAt) < toMillis(prev.updatedAt)) pick = prev;
+          else pick = a.produto ? a : prev;
+          byScopedKey.set(scopedKey, pick);
         }
         const merged = Array.from(byScopedKey.values());
 
@@ -709,7 +718,7 @@ const MinhasTarefasPage: React.FC = () => {
 
             const pr = projectLinha(r);
             const extra: Atribuicao = {
-              id: makeAtribuicaoId(`${k}`), // <<< CORRIGIDO: só pleitoKey
+              id: makeAtribuicaoId(`${k}`), // <<< mantém apenas pleitoKey
               pautaId,
               pleitoKey: k,
               ncm: pr.ncm,
@@ -792,7 +801,7 @@ const MinhasTarefasPage: React.FC = () => {
   /** URL para abrir a análise.
    * Importante: NÃO usar `blank=1` no fluxo normal; usar `blank=1` apenas no reaproveitamento. */
   function buildOpenUrl(t: Atribuicao, opts?: { copyFrom?: string | null }) {
-    // <<< CORRIGIDO: o ID real precisa ser somente a pleitoKey codificada
+    // <<< mantém ID (se existir) ou cai para pleitoKey codificada
     const atrId = t.id || makeAtribuicaoId(`${t.pleitoKey || ""}`);
     const qs = new URLSearchParams();
     const shouldBlank = !!opts?.copyFrom || !!t.__extraReaproveitar;
