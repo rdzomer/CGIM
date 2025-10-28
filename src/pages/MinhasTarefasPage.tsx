@@ -307,7 +307,11 @@ async function computeVersionNumbers(_db: any, list: PautaDoc[]): Promise<Map<st
   }
 
   const byBaseName: Record<string, PautaDoc[]> = {};
-  for (const p of list) (byBaseName[baseNameForGrouping(p)] = byBaseNameForGrouping(p)] || []).push(p);
+ for (const p of list) {
+  const key = baseNameForGrouping(p);
+  byBaseName[key] = byBaseName[key] || [];
+  byBaseName[key].push(p);
+}
   for (const arr of Object.values(byBaseName)) {
     const sorted = [...arr].sort((a, b) => uploadTs(a) - uploadTs(b));
     let v = 1;
