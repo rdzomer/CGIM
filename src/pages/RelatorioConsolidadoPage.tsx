@@ -46,6 +46,19 @@ const normalizeStatus = (s?: string) => {
   return "nao_iniciado";
 };
 
+/** Escapa HTML para evitar quebra do template (usada na impressão completa) */
+function escapeHtml(input?: any) {
+  const str = String(input ?? "");
+  const map: Record<string, string> = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  };
+  return str.replace(/[&<>"']/g, (ch) => map[ch]);
+}
+
 // Remove HTML e marcações vazias (“—”, “-”, &nbsp;)
 function cleanRichText(input?: any) {
   let t = String(input ?? "");
