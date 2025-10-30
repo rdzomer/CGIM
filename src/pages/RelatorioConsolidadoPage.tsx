@@ -20,6 +20,21 @@ const norm = (s?: any) =>
     .replace(/\s+/g, " ")
     .trim();
 
+/** Normaliza mantendo quebras de linha (não colapsa \n) */
+const normKeepBreaks = (s?: any) => {
+  let t = String(s ?? "");
+  // normaliza NBSP e espaços múltiplos, mas preserva \n
+  t = t.replace(/\u00A0/g, " ");
+  // colapsa espaços em cada linha
+  t = t
+    .split(/\r?\n/)
+    .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+    .join("\n");
+  // remove múltiplas linhas vazias consecutivas
+  t = t.replace(/\n{3,}/g, "\n\n").trim();
+  return t;
+};
+
 const normKey = (s?: any) =>
   norm(s)
     .toLowerCase()
@@ -59,19 +74,31 @@ function escapeHtml(input?: any) {
   return str.replace(/[&<>"']/g, (ch) => map[ch]);
 }
 
-// Remove HTML e marcações vazias (“—”, “-”, &nbsp;)
+/** Renderiza texto preservando \n como <br> (já com escape de HTML) */
+function renderWithBreaks(input?: any) {
+  if (input == null) return "";
+  const esc = escapeHtml(String(input));
+  return esc.replace(/\n/g, "<br/>");
+}
+
+// Remove HTML e marcações vazias (“—”, “-”, &nbsp;), preservando quebras
 function cleanRichText(input?: any) {
   let t = String(input ?? "");
   if (!t) return "";
   t = t
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/p>\s*<p>/gi, "\n")
+    .replace(/<\s*\/?li\s*>/gi, "\n") // se vier lista, separa itens por linha
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&#160;/gi, " ")
     .replace(/[\u2000-\u200B]/g, " ") // espaços finos/zero-width
     .replace(/[–—−]/g, "-");
-  t = norm(t);
+
+  // normalização que preserva quebras
+  t = normKeepBreaks(t);
+
+  // se a linha for só traços, trata como vazio
   if (/^[-–—]+$/.test(t)) return "";
   return t;
 }
@@ -641,7 +668,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
         const info = Object.entries(it.infoDaPauta)
           .map(
             ([k, v]) =>
-              `<div><b>${escapeHtml(k)}:</b></div><div>${escapeHtml(String(v))}</div>`
+              `<div><b>${escapeHtml(k)}:</b></div><div>${renderWithBreaks(String(v))}</div>`
           )
           .join("");
         const infoGrid = info ? `<div class="grid">${info}</div>` : "";
@@ -661,28 +688,28 @@ const RelatorioConsolidadoPage: React.FC = () => {
             ${infoGrid}
             ${
               it.analise.resumo
-                ? `<div class="sec resumo"><b>Resumo:</b> ${escapeHtml(
+                ? `<div class="sec resumo"><b>Resumo:</b> ${renderWithBreaks(
                     it.analise.resumo
                   )}</div>`
                 : ""
             }
             ${
               it.analise.comercio
-                ? `<div class="sec comercio"><b>Comércio:</b> ${escapeHtml(
+                ? `<div class="sec comercio"><b>Comércio:</b> ${renderWithBreaks(
                     it.analise.comercio
                   )}</div>`
                 : ""
             }
             ${
               it.analise.tecnica
-                ? `<div class="sec tecnica"><b>Análise Técnica:</b> ${escapeHtml(
+                ? `<div class="sec tecnica"><b>Análise Técnica:</b> ${renderWithBreaks(
                     it.analise.tecnica
                   )}</div>`
                 : ""
             }
             ${
               it.analise.sugestao
-                ? `<div class="sec sugestao"><b>Sugestão CGIM:</b> ${escapeHtml(
+                ? `<div class="sec sugestao"><b>Sugestão CGIM:</b> ${renderWithBreaks(
                     it.analise.sugestao
                   )}</div>`
                 : ""
