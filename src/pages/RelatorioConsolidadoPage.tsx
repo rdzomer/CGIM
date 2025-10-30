@@ -16,11 +16,11 @@ import { exportRelatorioDocx, CabecalhoRelatorio } from "../services/relatorioEx
 /** ===================== Utils ===================== */
 const norm = (s?: any) =>
   String(s ?? "")
-    .replace(/\u00A0/g, " ")      // NBSP -> espaço normal
+    .replace(/\u00A0/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-/** Normaliza mantendo quebras de linha (não colapsa \n) */
+/** Normaliza mantendo quebras de linha */
 const normKeepBreaks = (s?: any) => {
   let t = String(s ?? "");
   t = t.replace(/\u00A0/g, " ");
@@ -58,7 +58,7 @@ const normalizeStatus = (s?: string) => {
   return "nao_iniciado";
 };
 
-/** Escapa HTML */
+/** Escapa HTML básico */
 function escapeHtml(input?: any) {
   const str = String(input ?? "");
   const map: Record<string, string> = {
@@ -71,52 +71,38 @@ function escapeHtml(input?: any) {
   return str.replace(/[&<>"']/g, (ch) => map[ch]);
 }
 
-/** \n -> <br/> (com escape) */
-function renderWithBreaks(input?: any) {
-  if (input == null) return "";
-  const esc = escapeHtml(String(input));
-  return esc.replace(/\n/g, "<br/>");
-}
-
 /**
  * Limpa HTML preservando quebras:
- * - Converte <br> em \n
- * - Converte transições e fechamentos de tags de BLOCO em \n antes de remover as tags
- * - Remove o restante, normaliza e mantém \n
+ * - <br> => \n
+ * - transições/fechamentos de tags de bloco viram \n
+ * - remove demais tags e normaliza mantendo \n
  */
 function cleanRichText(input?: any) {
   let t = String(input ?? "");
   if (!t) return "";
 
-  // 1) normalizações simples
   t = t
     .replace(/&nbsp;/gi, " ")
     .replace(/&#160;/gi, " ")
-    .replace(/[\u2000-\u200B]/g, " ") // espaços finos/zero-width
+    .replace(/[\u2000-\u200B]/g, " ")
     .replace(/[–—−]/g, "-");
 
-  // 2) <br> => \n
+  // quebra explícita
   t = t.replace(/<\s*br\s*\/?>/gi, "\n");
 
-  // 3) separadores de parágrafo/lista entre blocos comuns => \n
+  // blocos comuns
   const block = "(?:p|div|li|h[1-6]|tr|section|article|blockquote|pre|ul|ol)";
-  // a) ...</block>\s*<block>... => adiciona quebra
-  t = t.replace(new RegExp(`</\\s*${block}\\s*>\\s*<\\s*${block}\\s*>`, "gi"), "\n");
-  // b) fechamento de block => quebra
+  t = t.replace(new RegExp(`</\\s*${block}\\s*>\\s*<\\s*${block}[^>]*>`, "gi"), "\n");
   t = t.replace(new RegExp(`</\\s*${block}\\s*>`, "gi"), "\n");
-  // c) abertura de <li> sugere novo item (caso não venha com </li> anterior)
   t = t.replace(/<\s*li[^>]*>/gi, "\n");
-
-  // 4) </p><p> padrão (por redundância)
   t = t.replace(/<\/p>\s*<p>/gi, "\n");
 
-  // 5) remove demais tags
+  // remove demais tags
   t = t.replace(/<[^>]+>/g, " ");
 
-  // 6) normalização preservando \n
+  // normalização preservando \n
   t = normKeepBreaks(t);
 
-  // 7) linhas só com traços => vazio
   if (/^[-–—]+$/.test(t)) return "";
   return t;
 }
@@ -135,7 +121,7 @@ type PautaDoc = {
   tituloArquivo?: string;
   createdAt?: any;
   sections?: any[];
-  secoes?: any[]; // legado
+  secoes?: any[];
   diffResumo?: { baseId?: string } | null;
   isRetificadora?: boolean;
 };
@@ -159,7 +145,7 @@ type Atribuicao = {
   status?: string;
   analise?: AnaliseBloco | (AnaliseBloco & { analiseTecnica?: string; sugestaoCgim?: string }) | null;
   updatedAt?: any;
-  // campos legados (raiz)
+  // legados
   resumo?: string;
   dadosComercio?: string;
   analiseTecnica?: string;
@@ -209,17 +195,12 @@ function flattenPauta(p: PautaDoc): Array<{ secao: string; row: any }> {
   for (const sec of list as any[]) {
     const secTitle = String(sec?.title ?? sec?.titulo ?? "") || "";
     pushRows(secTitle, sec?.rows);
-    if (Array.isArray(sec?.tabelas)) {
-      for (const t of sec.tabelas) pushRows(secTitle, t?.rows);
-    }
-    if (Array.isArray(sec?.tables)) {
-      for (const t of sec.tables) pushRows(secTitle, t?.rows);
-    }
+    if (Array.isArray(sec?.tabelas)) for (const t of sec.tabelas) pushRows(secTitle, t?.rows);
+    if (Array.isArray(sec?.tables)) for (const t of sec.tables) pushRows(secTitle, t?.rows);
   }
   return out;
 }
 
-/** Mapeia campos core de uma linha de pauta */
 function projectLinha(row: Record<string, any>) {
   const keys = Object.keys(row || {});
   const by = (labels: string[]) => {
@@ -245,33 +226,27 @@ function projectLinha(row: Record<string, any>) {
   return { ncm, produto, pleiteante, tipoPleito };
 }
 
-/** Gera a mesma chave usada nas atribuições (com normalização tolerante) */
 function gerarPleitoKeyFromRow(row: any) {
   const { ncm, produto, pleiteante } = projectLinha(row);
   const key = [only8(ncm), softKey(produto), softKey(pleiteante)].filter(Boolean).join("|");
   return key;
 }
 
-/** Consolida análise a partir de todos os formatos possíveis (novo e legados) */
 function unificarAnalise(a: Atribuicao): NonNullable<AnaliseBloco> {
   const an = (a.analise ?? {}) as any;
-  const resumo =
-    cleanRichText(an?.resumo) || cleanRichText(a.resumo);
-  const comercio =
-    cleanRichText(an?.comercio) || cleanRichText(a.dadosComercio);
+  const resumo = cleanRichText(an?.resumo) || cleanRichText(a.resumo);
+  const comercio = cleanRichText(an?.comercio) || cleanRichText(a.dadosComercio);
   const tecnica =
     cleanRichText(an?.tecnica) ||
-    cleanRichText(an?.analiseTecnica) ||   // legado aninhado
-    cleanRichText(a.analiseTecnica);       // legado raiz
+    cleanRichText(an?.analiseTecnica) ||
+    cleanRichText(a.analiseTecnica);
   const sugestao =
     cleanRichText(an?.sugestao) ||
-    cleanRichText(an?.sugestaoCgim) ||     // legado aninhado
-    cleanRichText(a.sugestaoCgim);         // legado raiz
-
+    cleanRichText(an?.sugestaoCgim) ||
+    cleanRichText(a.sugestaoCgim);
   return { resumo, comercio, tecnica, sugestao };
 }
 
-/** Heurística: remover artefatos de OCR/planilha como "Col_1", etc. */
 function isColArtefact(key: string) {
   const k = normKey(key);
   if (/^col[\s._-]*\d+$/.test(k)) return true;
@@ -280,7 +255,6 @@ function isColArtefact(key: string) {
   return false;
 }
 
-/** Normaliza o título da seção */
 function normalizarSecao(input: string) {
   const original = norm(input);
   let nk = normKey(original)
@@ -299,13 +273,13 @@ const RelatorioConsolidadoPage: React.FC = () => {
   const [sp, setSp] = useSearchParams();
 
   const [pautas, setPautas] = useState<PautaOption[]>([]);
-  const [pautaSel, setPautaSel] = useState<string>(""); // pautaId
+  const [pautaSel, setPautaSel] = useState<string>("");
   const [pautaDoc, setPautaDoc] = useState<PautaDoc | null>(null);
 
   const [atribuicoes, setAtribuicoes] = useState<Atribuicao[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Carrega opções de pautas (dropdown)
+  // Carrega opções de pautas
   useEffect(() => {
     (async () => {
       const snap = await getDocs(collection(db, "pautas"));
@@ -341,7 +315,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
         });
       });
 
-      // numera retificações por baseKey
       const byBase = new Map<string, PautaOption[]>();
       for (const p of temp) {
         const arr = byBase.get(p.baseKey) || [];
@@ -366,7 +339,10 @@ const RelatorioConsolidadoPage: React.FC = () => {
         .map((o) => {
           const hasV = o.isRet && o.versaoRet && o.versaoRet > 0;
           const meetingLabel = hasV
-            ? String(o.meeting || "").replace(/\(RETIFICADA\)/i, `(RETIFICADA v${o.versaoRet})`)
+            ? String(o.meeting || "").replace(
+                /\(RETIFICADA\)/i,
+                `(RETIFICADA v${o.versaoRet})`
+              )
             : o.meeting;
           return { ...o, meeting: meetingLabel || o.meeting };
         })
@@ -381,7 +357,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Atualiza URL quando muda seleção
+  // Atualiza URL
   useEffect(() => {
     if (!pautaSel) return;
     const next = new URLSearchParams(sp);
@@ -389,7 +365,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     setSp(next, { replace: true });
   }, [pautaSel]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Carrega pauta selecionada
+  // Carrega pauta
   useEffect(() => {
     if (!pautaSel) return;
     (async () => {
@@ -410,7 +386,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     })();
   }, [pautaSel, db]);
 
-  // Carrega atribuições da pauta e complementa por pleitoKey
+  // Carrega atribuições
   useEffect(() => {
     if (!pautaSel) return;
     (async () => {
@@ -433,7 +409,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
           const jaTem = new Set<string>(
             arr.map((a) => softKey(String(a.pleitoKey || ""))).filter(Boolean)
           );
-
           const missing = Array.from(keysSet).filter((k) => k && !jaTem.has(k));
 
           for (let i = 0; i < missing.length; i += 10) {
@@ -448,7 +423,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
         const dedup = Array.from(dedupMap.values());
 
         const ajustados = dedup.map((a) => ({ ...a, status: normalizeStatus(a.status) }));
-
         setAtribuicoes(ajustados);
       } finally {
         setLoading(false);
@@ -456,7 +430,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     })().catch(console.error);
   }, [pautaSel, pautaDoc, db]);
 
-  /** Monta itens finais seguindo a ordem da pauta. */
+  /** Monta itens finais seguindo a ordem da pauta */
   const itensBase: ItemRelatorio[] = useMemo(() => {
     if (!pautaDoc) return [];
 
@@ -465,8 +439,8 @@ const RelatorioConsolidadoPage: React.FC = () => {
     let i = 1;
 
     const byKey = new Map<string, Atribuicao>();
-    const byPair = new Map<string, Atribuicao>();   // ncm|produto (soft)
-    const byPair2 = new Map<string, Atribuicao>();  // ncm|pleiteante (soft)
+    const byPair = new Map<string, Atribuicao>();
+    const byPair2 = new Map<string, Atribuicao>();
 
     for (const a of atribuicoes) {
       const ncm8 = only8(a.ncm);
@@ -574,7 +548,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     return out;
   }, [pautaDoc, atribuicoes]);
 
-  /** Versão padrão (somente Técnica + Sugestão) para visualização/impresso padrão/DOCX */
+  /** Versão padrão para visualização/DOCX */
   const itensTS: ItemRelatorio[] = useMemo(() => {
     return itensBase.map((it) => ({
       ...it,
@@ -588,7 +562,8 @@ const RelatorioConsolidadoPage: React.FC = () => {
     const fileTitle = String((pautaDoc as any)?.tituloArquivo || "");
     const isRet =
       !!((pautaDoc as any)?.diffResumo?.baseId || (pautaDoc as any)?.isRetificadora) ||
-      /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
+      /retificad/i.test(meetingRaw) ||
+      /retificad/i.test(fileTitle);
     const meetingLabel = `${meetingRaw}${isRet && !/\(RETIFICADA/.test(meetingRaw) ? " (RETIFICADA)" : ""}`;
     const linhaTopo = "Ministério do Desenvolvimento, Indústria, Comércio e Serviços";
     const blocoCompleto = `Relatório de Análises – CGIM – Pauta ${meetingLabel}`;
@@ -610,14 +585,16 @@ const RelatorioConsolidadoPage: React.FC = () => {
     });
   };
 
+  /** Imprime o padrão (tela atual) */
   const imprimirPadrao = () => window.print();
 
-  /** Imprimir COMPLETO */
+  /** Imprimir COMPLETO – com preservação de quebras via CSS (.preserve) */
   const imprimirCompleto = () => {
     if (!itensBase.length) return;
 
     const sel = pautas.find((p) => p.id === pautaSel);
     const title = `Relatório Completo – ${String(sel?.meeting || pautaDoc?.meeting || pautaSel)}`;
+
     const css = `
       * { box-sizing: border-box; }
       body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 24px; color: #0f172a; }
@@ -633,8 +610,10 @@ const RelatorioConsolidadoPage: React.FC = () => {
       .comercio { background: #eff6ff; border: 1px solid #bfdbfe; }
       .tecnica { background: #fff7ed; border: 1px solid #fed7aa; }
       .sugestao { background: #ecfdf5; border: 1px solid #a7f3d0; }
+      .preserve { white-space: pre-line; } /* <- PRESERVA QUEBRAS DE LINHA */
       @media print { body { margin: 0; } .page-break { page-break-after: always; } }
     `;
+
     const header = `
       <h1>${escapeHtml(title)}</h1>
       <div class="sub">${escapeHtml(cabecalho.linhaTopo)} — ${escapeHtml(cabecalho.blocoCompleto)}</div>
@@ -642,7 +621,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
     const bodyCards = itensBase.map((it) => {
       const info = Object.entries(it.infoDaPauta)
-        .map(([k, v]) => `<div><b>${escapeHtml(k)}:</b></div><div>${renderWithBreaks(String(v))}</div>`)
+        .map(([k, v]) =>
+          `<div><b>${escapeHtml(k)}:</b></div><div class="preserve">${escapeHtml(String(v))}</div>`
+        )
         .join("");
       const infoGrid = info ? `<div class="grid">${info}</div>` : "";
 
@@ -657,10 +638,10 @@ const RelatorioConsolidadoPage: React.FC = () => {
             <div><b>Produto:</b></div><div>${escapeHtml(it.produto || "—")}</div>
           </div>
           ${infoGrid}
-          ${it.analise.resumo   ? `<div class="sec resumo"><b>Resumo:</b> ${renderWithBreaks(it.analise.resumo)}</div>`   : ""}
-          ${it.analise.comercio ? `<div class="sec comercio"><b>Comércio:</b> ${renderWithBreaks(it.analise.comercio)}</div>` : ""}
-          ${it.analise.tecnica  ? `<div class="sec tecnica"><b>Análise Técnica:</b> ${renderWithBreaks(it.analise.tecnica)}</div>` : ""}
-          ${it.analise.sugestao ? `<div class="sec sugestao"><b>Sugestão CGIM:</b> ${renderWithBreaks(it.analise.sugestao)}</div>` : ""}
+          ${it.analise.resumo   ? `<div class="sec resumo"><b>Resumo:</b> <div class="preserve">${escapeHtml(it.analise.resumo)}</div></div>` : ""}
+          ${it.analise.comercio ? `<div class="sec comercio"><b>Comércio:</b> <div class="preserve">${escapeHtml(it.analise.comercio)}</div></div>` : ""}
+          ${it.analise.tecnica  ? `<div class="sec tecnica"><b>Análise Técnica:</b> <div class="preserve">${escapeHtml(it.analise.tecnica)}</div></div>` : ""}
+          ${it.analise.sugestao ? `<div class="sec sugestao"><b>Sugestão CGIM:</b> <div class="preserve">${escapeHtml(it.analise.sugestao)}</div></div>` : ""}
         </div>
       `;
     }).join("\n");
@@ -708,9 +689,14 @@ const RelatorioConsolidadoPage: React.FC = () => {
     iframe.style.border = "0";
     iframe.src = url;
     iframe.onload = () => {
-      try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); }
-      finally {
-        setTimeout(() => { URL.revokeObjectURL(url); iframe.remove(); }, 5000);
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      } finally {
+        setTimeout(() => {
+          URL.revokeObjectURL(url);
+          iframe.remove();
+        }, 5000);
       }
     };
     document.body.appendChild(iframe);
