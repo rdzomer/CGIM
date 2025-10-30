@@ -23,14 +23,11 @@ const norm = (s?: any) =>
 /** Normaliza mantendo quebras de linha (não colapsa \n) */
 const normKeepBreaks = (s?: any) => {
   let t = String(s ?? "");
-  // normaliza NBSP e espaços múltiplos, mas preserva \n
   t = t.replace(/\u00A0/g, " ");
-  // colapsa espaços em cada linha
   t = t
     .split(/\r?\n/)
     .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
     .join("\n");
-  // remove múltiplas linhas vazias consecutivas
   t = t.replace(/\n{3,}/g, "\n\n").trim();
   return t;
 };
@@ -43,7 +40,7 @@ const normKey = (s?: any) =>
 
 const softKey = (s?: any) =>
   normKey(s)
-    .replace(/[^\w|]+/g, " ") // mantém letras/dígitos/_ e pipe; o resto vira espaço
+    .replace(/[^\w|]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -61,7 +58,7 @@ const normalizeStatus = (s?: string) => {
   return "nao_iniciado";
 };
 
-/** Escapa HTML para evitar quebra do template (usada na impressão completa) */
+/** Escapa HTML */
 function escapeHtml(input?: any) {
   const str = String(input ?? "");
   const map: Record<string, string> = {
@@ -74,31 +71,52 @@ function escapeHtml(input?: any) {
   return str.replace(/[&<>"']/g, (ch) => map[ch]);
 }
 
-/** Renderiza texto preservando \n como <br> (já com escape de HTML) */
+/** \n -> <br/> (com escape) */
 function renderWithBreaks(input?: any) {
   if (input == null) return "";
   const esc = escapeHtml(String(input));
   return esc.replace(/\n/g, "<br/>");
 }
 
-// Remove HTML e marcações vazias (“—”, “-”, &nbsp;), preservando quebras
+/**
+ * Limpa HTML preservando quebras:
+ * - Converte <br> em \n
+ * - Converte transições e fechamentos de tags de BLOCO em \n antes de remover as tags
+ * - Remove o restante, normaliza e mantém \n
+ */
 function cleanRichText(input?: any) {
   let t = String(input ?? "");
   if (!t) return "";
+
+  // 1) normalizações simples
   t = t
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>\s*<p>/gi, "\n")
-    .replace(/<\s*\/?li\s*>/gi, "\n") // se vier lista, separa itens por linha
-    .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&#160;/gi, " ")
     .replace(/[\u2000-\u200B]/g, " ") // espaços finos/zero-width
     .replace(/[–—−]/g, "-");
 
-  // normalização que preserva quebras
+  // 2) <br> => \n
+  t = t.replace(/<\s*br\s*\/?>/gi, "\n");
+
+  // 3) separadores de parágrafo/lista entre blocos comuns => \n
+  const block = "(?:p|div|li|h[1-6]|tr|section|article|blockquote|pre|ul|ol)";
+  // a) ...</block>\s*<block>... => adiciona quebra
+  t = t.replace(new RegExp(`</\\s*${block}\\s*>\\s*<\\s*${block}\\s*>`, "gi"), "\n");
+  // b) fechamento de block => quebra
+  t = t.replace(new RegExp(`</\\s*${block}\\s*>`, "gi"), "\n");
+  // c) abertura de <li> sugere novo item (caso não venha com </li> anterior)
+  t = t.replace(/<\s*li[^>]*>/gi, "\n");
+
+  // 4) </p><p> padrão (por redundância)
+  t = t.replace(/<\/p>\s*<p>/gi, "\n");
+
+  // 5) remove demais tags
+  t = t.replace(/<[^>]+>/g, " ");
+
+  // 6) normalização preservando \n
   t = normKeepBreaks(t);
 
-  // se a linha for só traços, trata como vazio
+  // 7) linhas só com traços => vazio
   if (/^[-–—]+$/.test(t)) return "";
   return t;
 }
@@ -253,7 +271,7 @@ function unificarAnalise(a: Atribuicao): NonNullable<AnaliseBloco> {
   return { resumo, comercio, tecnica, sugestao };
 }
 
-/** Heurística: remover artefatos de OCR/planilha como "Col_1", "Col. 1", "col-1" */
+/** Heurística: remover artefatos de OCR/planilha como "Col_1", etc. */
 function isColArtefact(key: string) {
   const k = normKey(key);
   if (/^col[\s._-]*\d+$/.test(k)) return true;
@@ -262,12 +280,12 @@ function isColArtefact(key: string) {
   return false;
 }
 
-/** Normaliza o título da seção para exibição consistente */
+/** Normaliza o título da seção */
 function normalizarSecao(input: string) {
   const original = norm(input);
   let nk = normKey(original)
-    .replace(/^\s*\d+(?:\.\d+)*\s+/, "")    // remove "2.3 "
-    .replace(/\s+(no|na)\s+cat\b/g, "")     // remove "no CAT"/"na CAT"
+    .replace(/^\s*\d+(?:\.\d+)*\s+/, "")
+    .replace(/\s+(no|na)\s+cat\b/g, "")
     .replace(/\s+(no|na)\s+comit[eê]\b/g, "")
     .trim();
   if (/\bpleitos?\s+novos?\b/.test(nk)) return "Pleitos Novos";
@@ -287,7 +305,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
   const [atribuicoes, setAtribuicoes] = useState<Atribuicao[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // Carrega opções de pautas (dropdown) — com numeração de retificações
+  // Carrega opções de pautas (dropdown)
   useEffect(() => {
     (async () => {
       const snap = await getDocs(collection(db, "pautas"));
@@ -344,15 +362,11 @@ const RelatorioConsolidadoPage: React.FC = () => {
         }
       });
 
-      // label final com vN
       const opts = out
         .map((o) => {
           const hasV = o.isRet && o.versaoRet && o.versaoRet > 0;
           const meetingLabel = hasV
-            ? String(o.meeting || "").replace(
-                /\(RETIFICADA\)/i,
-                `(RETIFICADA v${o.versaoRet})`
-              )
+            ? String(o.meeting || "").replace(/\(RETIFICADA\)/i, `(RETIFICADA v${o.versaoRet})`)
             : o.meeting;
           return { ...o, meeting: meetingLabel || o.meeting };
         })
@@ -396,7 +410,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     })();
   }, [pautaSel, db]);
 
-  // Carrega atribuições da pauta e complementa por pleitoKey (sempre)
+  // Carrega atribuições da pauta e complementa por pleitoKey
   useEffect(() => {
     if (!pautaSel) return;
     (async () => {
@@ -405,11 +419,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
         const col = collection(db, "atribuicoes");
         const arr: Atribuicao[] = [];
 
-        // 1) atribuições desta pauta
         const snap1 = await getDocs(query(col, where("pautaId", "==", pautaSel)));
         snap1.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
 
-        // 2) completar por pleitoKey geradas a partir das linhas da pauta (tolerante)
         if (pautaDoc) {
           const rows = flattenPauta(pautaDoc);
           const keysSet = new Set<string>();
@@ -424,7 +436,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
           const missing = Array.from(keysSet).filter((k) => k && !jaTem.has(k));
 
-          // Firestore IN aceita até 10
           for (let i = 0; i < missing.length; i += 10) {
             const chunk = missing.slice(i, i + 10);
             const snap2 = await getDocs(query(col, where("pleitoKey", "in", chunk)));
@@ -432,12 +443,10 @@ const RelatorioConsolidadoPage: React.FC = () => {
           }
         }
 
-        // dedupe por id
         const dedupMap = new Map<string, Atribuicao>();
         for (const a of arr) dedupMap.set(a.id, a);
         const dedup = Array.from(dedupMap.values());
 
-        // normaliza somente o status aqui; análise será unificada na hora de montar itens
         const ajustados = dedup.map((a) => ({ ...a, status: normalizeStatus(a.status) }));
 
         setAtribuicoes(ajustados);
@@ -470,10 +479,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
       if (ncm8 && pl) byPair2.set(pair2, a);
     }
 
-    /** Critério de inclusão:
-     *  - precisa estar CONCLUÍDO
-     *  - e ter Análise Técnica OU Sugestão CGIM preenchidas (aceitando formatos legados)
-     */
     function isOk(at?: Atribuicao) {
       if (!at) return false;
       if (normalizeStatus(at.status) !== "concluido") return false;
@@ -483,7 +488,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
     for (const { secao, row } of rows) {
       const { ncm, produto, pleiteante, tipoPleito } = projectLinha(row);
-      const keySoft = gerarPleitoKeyFromRow(row); // soft
+      const keySoft = gerarPleitoKeyFromRow(row);
       const n8 = only8(ncm);
       const prodSoft = softKey(produto);
       const pleitSoft = softKey(pleiteante);
@@ -493,7 +498,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
         byPair.get(`${n8}|${prodSoft}`) ||
         byPair2.get(`${n8}|${pleitSoft}`);
 
-      // Fallback 1: NCM igual + produto “contém/contido em”
       if (!a && n8) {
         const cands = atribuicoes.filter((x) => only8(x.ncm) === n8);
         const found = cands.find((x) => {
@@ -503,7 +507,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
         if (found) a = found;
       }
 
-      // Fallback 2: NCM igual + pleiteante “contém/contido em”
       if (!a && n8) {
         const cands = atribuicoes.filter((x) => only8(x.ncm) === n8);
         const found = cands.find((x) => {
@@ -513,7 +516,6 @@ const RelatorioConsolidadoPage: React.FC = () => {
         if (found) a = found;
       }
 
-      // Fallback 3: melhor candidato por score (NCM + similaridade básica)
       if (!a) {
         let best: { a: Atribuicao; score: number } | null = null;
         for (const x of atribuicoes) {
@@ -535,28 +537,13 @@ const RelatorioConsolidadoPage: React.FC = () => {
         const nk = normKey(k);
         if (
           [
-            "ncm",
-            "código ncm",
-            "codigo ncm",
-            "código",
-            "codigo",
-            "ncm 8",
-            "produto",
-            "descrição",
-            "descricao",
-            "pleiteante",
-            "requerente",
-            "solicitante",
-            "empresa",
-            "tipo de pleito",
-            "tipo do pleito",
-            "tipo",
-            "pleito",
-            "pedido",
+            "ncm","código ncm","codigo ncm","código","codigo","ncm 8",
+            "produto","descrição","descricao",
+            "pleiteante","requerente","solicitante","empresa",
+            "tipo de pleito","tipo do pleito","tipo","pleito","pedido",
           ].includes(nk)
-        )
-          return;
-        if (["id", "key", "pleitokey"].includes(nk)) return;
+        ) return;
+        if (["id","key","pleitokey"].includes(nk)) return;
         if (isColArtefact(k)) return;
         if (v == null) return;
         if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
@@ -591,11 +578,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
   const itensTS: ItemRelatorio[] = useMemo(() => {
     return itensBase.map((it) => ({
       ...it,
-      analise: {
-        ...it.analise,
-        resumo: "",
-        comercio: "",
-      },
+      analise: { ...it.analise, resumo: "", comercio: "" },
     }));
   }, [itensBase]);
 
@@ -605,8 +588,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     const fileTitle = String((pautaDoc as any)?.tituloArquivo || "");
     const isRet =
       !!((pautaDoc as any)?.diffResumo?.baseId || (pautaDoc as any)?.isRetificadora) ||
-      /retificad/i.test(meetingRaw) ||
-      /retificad/i.test(fileTitle);
+      /retificad/i.test(meetingRaw) || /retificad/i.test(fileTitle);
     const meetingLabel = `${meetingRaw}${isRet && !/\(RETIFICADA/.test(meetingRaw) ? " (RETIFICADA)" : ""}`;
     const linhaTopo = "Ministério do Desenvolvimento, Indústria, Comércio e Serviços";
     const blocoCompleto = `Relatório de Análises – CGIM – Pauta ${meetingLabel}`;
@@ -621,26 +603,21 @@ const RelatorioConsolidadoPage: React.FC = () => {
       nomeArquivo: (() => {
         const sel = pautas.find((p) => p.id === pautaSel);
         return (
-          `Relatorio_CGIM_${String(sel?.meeting || pautaDoc?.meeting || pautaSel)}`.replace(
-            /[^\w\s().-]+/g,
-            "_"
-          ) + ".docx"
+          `Relatorio_CGIM_${String(sel?.meeting || pautaDoc?.meeting || pautaSel)}`
+            .replace(/[^\w\s().-]+/g, "_") + ".docx"
         );
       })(),
     });
   };
 
-  /** Imprime o padrão (Técnica + Sugestão) usando o DOM atual */
   const imprimirPadrao = () => window.print();
 
-  /** Imprimir COMPLETO – versão robusta (Blob URL + onload, sem document.write) */
+  /** Imprimir COMPLETO */
   const imprimirCompleto = () => {
     if (!itensBase.length) return;
 
-    const title = (() => {
-      const sel = pautas.find((p) => p.id === pautaSel);
-      return `Relatório Completo – ${String(sel?.meeting || pautaDoc?.meeting || pautaSel)}`;
-    })();
+    const sel = pautas.find((p) => p.id === pautaSel);
+    const title = `Relatório Completo – ${String(sel?.meeting || pautaDoc?.meeting || pautaSel)}`;
     const css = `
       * { box-sizing: border-box; }
       body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 24px; color: #0f172a; }
@@ -663,61 +640,30 @@ const RelatorioConsolidadoPage: React.FC = () => {
       <div class="sub">${escapeHtml(cabecalho.linhaTopo)} — ${escapeHtml(cabecalho.blocoCompleto)}</div>
     `;
 
-    const bodyCards = itensBase
-      .map((it) => {
-        const info = Object.entries(it.infoDaPauta)
-          .map(
-            ([k, v]) =>
-              `<div><b>${escapeHtml(k)}:</b></div><div>${renderWithBreaks(String(v))}</div>`
-          )
-          .join("");
-        const infoGrid = info ? `<div class="grid">${info}</div>` : "";
+    const bodyCards = itensBase.map((it) => {
+      const info = Object.entries(it.infoDaPauta)
+        .map(([k, v]) => `<div><b>${escapeHtml(k)}:</b></div><div>${renderWithBreaks(String(v))}</div>`)
+        .join("");
+      const infoGrid = info ? `<div class="grid">${info}</div>` : "";
 
-        return `
-          <div class="card">
-            <div class="head">
-              <div class="title">${it.indice}. NCM ${escapeHtml(it.ncm)}</div>
-              <div class="meta">${escapeHtml(it.secaoTitulo)}${
-          it.tipoPleito ? " • " + escapeHtml(it.tipoPleito) : ""
-        }</div>
-            </div>
-            <div class="grid">
-              <div><b>Pleiteante:</b></div><div>${escapeHtml(it.pleiteante || "—")}</div>
-              <div><b>Produto:</b></div><div>${escapeHtml(it.produto || "—")}</div>
-            </div>
-            ${infoGrid}
-            ${
-              it.analise.resumo
-                ? `<div class="sec resumo"><b>Resumo:</b> ${renderWithBreaks(
-                    it.analise.resumo
-                  )}</div>`
-                : ""
-            }
-            ${
-              it.analise.comercio
-                ? `<div class="sec comercio"><b>Comércio:</b> ${renderWithBreaks(
-                    it.analise.comercio
-                  )}</div>`
-                : ""
-            }
-            ${
-              it.analise.tecnica
-                ? `<div class="sec tecnica"><b>Análise Técnica:</b> ${renderWithBreaks(
-                    it.analise.tecnica
-                  )}</div>`
-                : ""
-            }
-            ${
-              it.analise.sugestao
-                ? `<div class="sec sugestao"><b>Sugestão CGIM:</b> ${renderWithBreaks(
-                    it.analise.sugestao
-                  )}</div>`
-                : ""
-            }
+      return `
+        <div class="card">
+          <div class="head">
+            <div class="title">${it.indice}. NCM ${escapeHtml(it.ncm)}</div>
+            <div class="meta">${escapeHtml(it.secaoTitulo)}${it.tipoPleito ? " • " + escapeHtml(it.tipoPleito) : ""}</div>
           </div>
-        `;
-      })
-      .join("\n");
+          <div class="grid">
+            <div><b>Pleiteante:</b></div><div>${escapeHtml(it.pleiteante || "—")}</div>
+            <div><b>Produto:</b></div><div>${escapeHtml(it.produto || "—")}</div>
+          </div>
+          ${infoGrid}
+          ${it.analise.resumo   ? `<div class="sec resumo"><b>Resumo:</b> ${renderWithBreaks(it.analise.resumo)}</div>`   : ""}
+          ${it.analise.comercio ? `<div class="sec comercio"><b>Comércio:</b> ${renderWithBreaks(it.analise.comercio)}</div>` : ""}
+          ${it.analise.tecnica  ? `<div class="sec tecnica"><b>Análise Técnica:</b> ${renderWithBreaks(it.analise.tecnica)}</div>` : ""}
+          ${it.analise.sugestao ? `<div class="sec sugestao"><b>Sugestão CGIM:</b> ${renderWithBreaks(it.analise.sugestao)}</div>` : ""}
+        </div>
+      `;
+    }).join("\n");
 
     const html = `
       <!doctype html>
@@ -762,14 +708,9 @@ const RelatorioConsolidadoPage: React.FC = () => {
     iframe.style.border = "0";
     iframe.src = url;
     iframe.onload = () => {
-      try {
-        iframe.contentWindow?.focus();
-        iframe.contentWindow?.print();
-      } finally {
-        setTimeout(() => {
-          URL.revokeObjectURL(url);
-          iframe.remove();
-        }, 5000);
+      try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); }
+      finally {
+        setTimeout(() => { URL.revokeObjectURL(url); iframe.remove(); }, 5000);
       }
     };
     document.body.appendChild(iframe);
