@@ -1,6 +1,6 @@
 // src/firebase.ts
 import { initializeApp, getApps } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import { initializeFirestore } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 
 // Lê configuração do Vite (exposta no cliente via prefixo VITE_)
@@ -38,5 +38,8 @@ if (import.meta.env.DEV) {
 }
 
 const app = getApps().length ? getApps()[0] : initializeApp(cfg as any);
-export const db = getFirestore(app);
+export const db = initializeFirestore(app, {
+  experimentalForceLongPolling: true,
+  useFetchStreams: false,
+});
 export const auth = getAuth(app);

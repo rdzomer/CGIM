@@ -91,11 +91,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const u = await readOrCreateUserDoc(fb);
         setUser(u);
       } catch (e) {
-        console.error("[Auth] onAuthStateChanged error:", e);
-        setUser(null);
-      } finally {
-        setLoading(false);
-      }
+  console.error("[Auth] onAuthStateChanged error:", e);
+  if (fb) {
+    // fallback temporário: entra com dados básicos do Auth
+    setUser({
+      uid: fb.uid,
+      email: fb.email ?? "",
+      nome: fb.displayName ?? "Usuário",
+      role: "Analista" as any,
+    } as any);
+  } else {
+    setUser(null);
+  }
+} finally {
+  setLoading(false);
+}
     });
     return () => unsub();
   }, []);
