@@ -18,6 +18,22 @@ import {
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import type { Role, Usuario } from "../types";
 
+// helper simples no topo do arquivo (ou acima do useEffect)
+function withTimeout<T>(promise: Promise<T>, ms: number, label = "timeout"): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => reject(new Error(label)), ms);
+    promise
+      .then((v) => {
+        clearTimeout(id);
+        resolve(v);
+      })
+      .catch((e) => {
+        clearTimeout(id);
+        reject(e);
+      });
+  });
+}
+
 type AuthContextType = {
   user: Usuario | null;
   loading: boolean;
@@ -45,7 +61,7 @@ function clean(obj: Record<string, any>) {
 
 async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
   const ref = doc(db, "users", fbUser.uid);
-  const snap = await getDoc(ref);
+  const snap = await withTimeout(getDoc(userRef), 2500, "firestore_boot_timeout");
 
   if (!snap.exists()) {
     // Inclua apenas campos definidos; use serverTimestamp para datas
