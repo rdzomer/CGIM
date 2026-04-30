@@ -7,14 +7,6 @@ import {
   getDocs,
 } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, User as FBUser } from "firebase/auth";
-import {
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  Tooltip as ReTooltip,
-  Legend as ReLegend,
-} from "recharts";
 import { getNcmSetCgim } from "../services/ncmsService";
 import { gerarPleitoKey, carregarAtribuicoesPorChaves } from "../services/atribuicoesService";
 import { norm, normKey, only8, toMillis, normalizeStatus } from "../utils/stringUtils";
@@ -317,15 +309,6 @@ const DashboardPage: React.FC = () => {
     return acc;
   }, [itens]);
 
-  const pieData = useMemo(
-    () => [
-      { name: "Novo", value: resumo.nao_iniciado },
-      { name: "Em Análise", value: resumo.em_analise },
-      { name: "Concluído", value: resumo.concluido },
-    ],
-    [resumo]
-  );
-  const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"];
 
   /* ==================== Navegação (somente leitura) ==================== */
   const openViewAnalyse = (atr: Atrib) => {
