@@ -167,24 +167,3 @@ export type AuthContextValue = {
   signOut: () => Promise<void>;
 };
 
-/** Contrato do PleitosContext */
-export type PleitosContextValue = {
-  pleitos: Pleito[];
-  loading: boolean;
-  filtro: PleitosFiltro;
-  setFiltro: (f: PleitosFiltro) => void;
-  addPleito: (p: Pleito) => Promise<string>;
-  updatePleito: (id: string, data: Partial<Pleito>) => Promise<void>;
-  deletePleito: (id: string) => Promise<void>;
-};
-
-/** Helper de normalização de NCM para o padrão 0000.00.00 (opcional) */
-export const normalizarNcm = (s?: string): string | undefined => {
-  if (!s) return s;
-  const onlyDigits = s.replace(/\D/g, '');
-  if (!onlyDigits) return undefined;
-  if (onlyDigits.length === 8) {
-    return `${onlyDigits.slice(0, 4)}.${onlyDigits.slice(4, 6)}.${onlyDigits.slice(6, 8)}`;
-  }
-  return s;
-};

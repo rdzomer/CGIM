@@ -18,6 +18,7 @@ import {
   upsertHistoricoFromAtribuicao,
 } from "../services/historicoAnalisesService";
 import { makeAtribuicaoId } from "../services/atribuicoesService";
+import { norm, normKey, only8, formatNcm8 } from "../utils/stringUtils";
 
 /* ----------------------------- Tipos ----------------------------- */
 type Analise = { resumo?: string; comercio?: string; tecnica?: string; sugestao?: string };
@@ -72,18 +73,6 @@ type PedidoExtraido = {
 };
 
 /* ----------------------------- Helpers ----------------------------- */
-const onlyDigits = (s?: string) => (s ?? "").replace(/\D+/g, "");
-const norm = (s?: any) => String(s ?? "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s?: any) =>
-  norm(s)
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-
-const fmtNCM = (s?: string) => {
-  const n8 = onlyDigits(s).slice(0, 8);
-  return n8.length === 8 ? `${n8.slice(0, 4)}.${n8.slice(4, 6)}.${n8.slice(6, 8)}` : (s || "—");
-};
 
 const HIDDEN_KEYS = /(key|pleitokey|__sec|_id|id|timestamp|created|updated|hash|vers[aã]o|revindex)/i;
 
@@ -152,7 +141,6 @@ function projectLinha(row: Record<string, any>) {
   const pleiteante = by(["Pleiteante","Requerente","Solicitante","Empresa"]);
   return { ncm, produto, pleiteante };
 }
-const only8 = (s?: any) => norm(s).replace(/\D+/g, "").slice(0, 8);
 function gerarPleitoKeyFromRow(row: any) {
   const { ncm, produto, pleiteante } = projectLinha(row);
   const key = [only8(ncm), norm(produto), norm(pleiteante)].filter(Boolean).join("|");
@@ -781,7 +769,7 @@ const AnalisePleitoPage: React.FC = () => {
               Seção: <span className="font-medium">{atr.tituloSecao || tituloSecaoQS || "—"}</span>
             </div>
             <h1 className="mt-1 text-xl font-semibold">
-              {fmtNCM(atr.ncm || ncmQS)} — {atr.produto || produtoQS || "Produto não identificado"}
+              {formatNcm8(atr.ncm || ncmQS)} — {atr.produto || produtoQS || "Produto não identificado"}
             </h1>
             <div className="text-sm text-gray-600 mt-1">
               <span className="font-medium">Pleiteante:</span> {atr.pleiteante || pleiteanteQS || "—"}
@@ -825,7 +813,7 @@ const AnalisePleitoPage: React.FC = () => {
         </div>
 
         <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Info label="NCM" value={fmtNCM(atr.ncm || ncmQS)} />
+          <Info label="NCM" value={formatNcm8(atr.ncm || ncmQS)} />
           <Info label="Tipo de Pleito" value={atr.tipoPleito || tipoPleitoQS || "—"} />
           <Info label="Produto (pleito)" value={atr.produto || produtoQS || "—"} className="md:col-span-2" />
           <Info label="Pleiteante" value={atr.pleiteante || pleiteanteQS || "—"} className="md:col-span-2" />

@@ -69,7 +69,7 @@ async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
       uid: fbUser.uid,
       email: fbUser.email ?? null,        // null é aceito, undefined não
       nome: fbUser.displayName ?? undefined,
-      role: ("analista" as unknown) as Role,
+      role: "Analista" as Role,
       isActive: true,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -82,12 +82,11 @@ async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
   }
 
   const data = snap.data() as any;
-  // Na leitura, tudo bem ter campos ausentes; complete com o que vier do auth
   return {
-    uid: fbUser.uid as any,
+    uid: fbUser.uid,
     email: fbUser.email ?? data?.email ?? null,
     nome: fbUser.displayName ?? data?.nome ?? null,
-    role: (data?.role as Role) ?? (("analista" as unknown) as Role),
+    role: (data?.role as Role) ?? ("Analista" as Role),
     ...data,
   } as Usuario;
 }
@@ -114,8 +113,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       uid: fb.uid,
       email: fb.email ?? "",
       nome: fb.displayName ?? "Usuário",
-      role: "Analista" as any,
-    } as any);
+      role: "Analista" as Role,
+    } as Usuario);
   } else {
     setUser(null);
   }

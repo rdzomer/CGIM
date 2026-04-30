@@ -34,14 +34,12 @@ import {
 
 // >>> serviço de versionamento/diff entre pautas
 import { diffPautas } from "../services/pautaVersioningCompat";
+import { norm, normKey, only8, onlyDigits } from "../utils/stringUtils";
 
 // ---------------- ANALISTAS PADRÃO ----------------
 const ANALISTAS = ["Ricardo Zomer", "Pedro Reckziegel", "Antônio Azambuja", "Tólio Ribeiro"] as const;
 
 // ---------------- helpers ----------------
-const norm = (s: string) => (s || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-function onlyDigits(s: string | undefined | null): string { if (!s) return ""; return String(s).replace(/\D+/g, ""); }
 
 function isHeaderLikely(h: string) {
   const k = normKey(h);
