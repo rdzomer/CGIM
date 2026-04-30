@@ -569,7 +569,7 @@ const AnalisePleitoPage: React.FC = () => {
       );
 
       // Histórico
-      try { await upsertHistoricoFromAtribuicao(db, targetDocId); } catch {}
+      try { await upsertHistoricoFromAtribuicao(db, { id: targetDocId }); } catch {}
 
       toast.success(status === "Concluído" ? "Análise concluída." : "Análise salva.");
 
@@ -984,3 +984,4 @@ function Field(props: { label: string; placeholder?: string; value: string; onCh
     </div>
   );
 }
+

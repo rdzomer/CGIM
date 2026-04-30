@@ -65,7 +65,6 @@ const app = getApps().length ? getApps()[0] : initializeApp(cfg as any);
 
 export const db = initializeFirestore(app, {
   experimentalForceLongPolling: true,
-  useFetchStreams: false,
 });
 
 export const auth = getAuth(app);

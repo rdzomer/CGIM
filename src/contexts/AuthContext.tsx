@@ -61,7 +61,7 @@ function clean(obj: Record<string, any>) {
 
 async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
   const ref = doc(db, "users", fbUser.uid);
-  const snap = await withTimeout(getDoc(userRef), 2500, "firestore_boot_timeout");
+  const snap = await withTimeout(getDoc(ref), 2500, "firestore_boot_timeout");
 
   if (!snap.exists()) {
     // Inclua apenas campos definidos; use serverTimestamp para datas
@@ -176,3 +176,4 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 // Hook padrão
 export const useAuth = () => useContext(AuthContext);
 export default AuthProvider;
+
