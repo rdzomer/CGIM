@@ -292,20 +292,3 @@ export async function importarNcmsPlanilha(file: File) {
   const buf = await file.arrayBuffer();
   return importarNcmsArrayBuffer(buf, file.name);
 }
-
-// Aliases aceitos pela UI (evita quebrar imports antigos):
-export const importarPlanilhaDeNcms = importarNcmsPlanilha;
-export const importarExcelNcms = importarNcmsPlanilha;
-
-// =========================
-// Compatibilidade de nomes
-// =========================
-export { getNcmSetCgim as getNcmSetCGIM };
-export { getNcmSetCgim as getNcmSetCgm };
-// Alias de listagem (assumimos que algumas telas chamam assim)
-export async function listarNcms(options?: { limit?: number; prefix?: string; cursor?: string }) {
-  const limit = options?.limit ?? 500;
-  const prefix = options?.prefix ?? "";
-  const cursor = options?.cursor;
-  return listarNcmsPorPrefixoPaginado(prefix, limit, cursor);
-}

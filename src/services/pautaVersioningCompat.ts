@@ -1,6 +1,7 @@
 // src/services/pautaVersioningCompat.ts
 import { getFirestore, doc, getDoc, updateDoc } from "firebase/firestore";
 import { gerarPleitoKey } from "./atribuicoesService";
+import { norm, only8 } from "../utils/stringUtils";
 
 // Tipos flexíveis para não quebrar com schemas variados
 type PautaDoc = Record<string, any> & {
@@ -10,9 +11,6 @@ type PautaDoc = Record<string, any> & {
 };
 
 type Row = Record<string, any>;
-
-const norm = (s: any) => String(s ?? "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const only8 = (s: any) => String(s ?? "").replace(/\D+/g, "").slice(0, 8);
 
 function projectCore(row: Row) {
   const keys = Object.keys(row || {});

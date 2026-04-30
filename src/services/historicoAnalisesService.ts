@@ -1,5 +1,6 @@
 // src/services/historicoAnalisesService.ts
 import { getFirestore, doc, getDoc, setDoc, collection, addDoc, serverTimestamp } from "firebase/firestore";
+import { norm, normKey, only8 } from "../utils/stringUtils";
 
 export type HistoricoAnaliseDoc = {
   pleitoKey: string;
@@ -28,10 +29,6 @@ type AtribuicaoLike = {
   updatedAt?: any;
 };
 
-const norm = (s?: string) =>
-  (s ?? "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s?: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-const only8 = (s?: string) => (s ?? "").replace(/\D+/g, "").slice(0, 8);
 const toMillis = (t: any): number => (typeof t?.toMillis === "function" ? t.toMillis() : (t instanceof Date ? t.getTime() : (typeof t === "number" ? t : 0)));
 
 export function toHistoricoFromAtrib(a: AtribuicaoLike): HistoricoAnaliseDoc | null {

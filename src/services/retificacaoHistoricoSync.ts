@@ -9,6 +9,7 @@ import {
   where,
 } from "firebase/firestore";
 import { upsertHistoricoFromAtribuicao } from "./historicoAnalisesService";
+import { norm, normKey, only8 } from "../utils/stringUtils";
 
 type AnyRow = Record<string, any>;
 type Atrib = {
@@ -22,10 +23,6 @@ type Atrib = {
   produto?: string;
   pleiteante?: string;
 };
-
-const norm = (s?: string) => (s ?? "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s?: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-const only8 = (s?: string) => (s ?? "").replace(/\D+/g, "").slice(0, 8);
 
 const toMillis = (t: any): number => {
   if (!t) return 0;
