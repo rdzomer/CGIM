@@ -887,7 +887,7 @@ const AnalisePleitoPage: React.FC = () => {
         <div className="mt-3 grid grid-cols-1 gap-4">
           <Field label="Resumo" placeholder="Escreva um resumo objetivo do pedido e do contexto..." value={form.resumo || ""} onChange={(v) => setForm((f) => ({ ...f, resumo: v }))} />
           <Field label="Análise de comércio" placeholder="Aspectos de comércio exterior, impactos, etc..." value={form.comercio || ""} onChange={(v) => setForm((f) => ({ ...f, comercio: v }))} />
-          <Field label="Análise técnica" placeholder="Exame técnico do produto, norma, classificação etc..." value={form.tecnica || ""} onChange={(v) => setForm((f) => ({ ...f, tecnica: v }))} />
+          <Field label="Análise técnica" placeholder="Análise integrada das alegações do pleiteante e contestações em confronto com os dados de comércio exterior..." value={form.tecnica || ""} onChange={(v) => setForm((f) => ({ ...f, tecnica: v }))} />
           <Field label="Sugestão" placeholder="Encaminhamento sugerido..." value={form.sugestao || ""} onChange={(v) => setForm((f) => ({ ...f, sugestao: v }))} />
         </div>
 
