@@ -38,9 +38,5 @@
       "path": "./tsconfig.node.json"
     }
   ],
-  "exclude": [
-    "src/components/pauta/PleitoActions.tsx",
-    "src/components/pleitos/PleitoEditModal.tsx",
-    "src/constants.ts"
-  ]
+  "exclude": []
 }
