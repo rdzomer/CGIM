@@ -1,5 +1,5 @@
 // src/pages/AnalisePleitoPage.tsx
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   doc,
@@ -12,13 +12,14 @@ import {
 } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, User } from "firebase/auth";
 import toast from "react-hot-toast";
-import { FileText } from "lucide-react";
+import { FileText, Sparkles, Loader2 } from "lucide-react";
 import {
   getHistoricoByPleitoKey,
   upsertHistoricoFromAtribuicao,
 } from "../services/historicoAnalisesService";
 import { makeAtribuicaoId } from "../services/atribuicoesService";
 import { norm, normKey, only8, formatNcm8 } from "../utils/stringUtils";
+import { analisarComercioComGemini } from "../services/geminiComercioService";
 
 /* ----------------------------- Tipos ----------------------------- */
 type Analise = { resumo?: string; comercio?: string; tecnica?: string; sugestao?: string };
@@ -226,6 +227,31 @@ const AnalisePleitoPage: React.FC = () => {
   const [draftLoadedFrom, setDraftLoadedFrom] = useState<"histórico" | null>(null);
 
   const [copiedSei, setCopiedSei] = useState<string | null>(null);
+  const [geminiLoading, setGeminiLoading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const ncmAtual = ncmQS || atr?.ncm || "";
+
+  const handleGeminiFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!fileInputRef.current) return;
+    fileInputRef.current.value = "";
+    if (!file) return;
+    if (!file.name.endsWith(".docx")) {
+      toast.error("Selecione um arquivo .docx");
+      return;
+    }
+    setGeminiLoading(true);
+    try {
+      const resultado = await analisarComercioComGemini(file, ncmAtual);
+      setForm((f) => ({ ...f, comercio: resultado }));
+      toast.success("Análise gerada com sucesso!");
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao gerar análise com IA");
+    } finally {
+      setGeminiLoading(false);
+    }
+  }, [ncmAtual]);
 
   const [prevIdMigrated, setPrevIdMigrated] = useState<string | null>(null);
   const [isRetificadora, setIsRetificadora] = useState<boolean>(false);
@@ -886,7 +912,36 @@ const AnalisePleitoPage: React.FC = () => {
 
         <div className="mt-3 grid grid-cols-1 gap-4">
           <Field label="Resumo" placeholder="Escreva um resumo objetivo do pedido e do contexto..." value={form.resumo || ""} onChange={(v) => setForm((f) => ({ ...f, resumo: v }))} />
-          <Field label="Análise de comércio" placeholder="Aspectos de comércio exterior, impactos, etc..." value={form.comercio || ""} onChange={(v) => setForm((f) => ({ ...f, comercio: v }))} />
+          {/* Análise de comércio com geração via Gemini */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-sm text-gray-600">Análise de comércio</label>
+              <button
+                type="button"
+                disabled={geminiLoading}
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
+              >
+                {geminiLoading
+                  ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
+                  : <><Sparkles size={13} /> Gerar com IA</>}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".docx"
+                className="hidden"
+                onChange={handleGeminiFile}
+              />
+            </div>
+            <textarea
+              className="w-full rounded border px-3 py-2"
+              rows={6}
+              placeholder="Aspectos de comércio exterior, impactos, etc... (ou clique em 'Gerar com IA' para preencher automaticamente a partir de uma ficha .docx)"
+              value={form.comercio || ""}
+              onChange={(e) => setForm((f) => ({ ...f, comercio: e.target.value }))}
+            />
+          </div>
           <Field label="Análise técnica" placeholder="Análise integrada das alegações do pleiteante e contestações em confronto com os dados de comércio exterior..." value={form.tecnica || ""} onChange={(v) => setForm((f) => ({ ...f, tecnica: v }))} />
           <Field label="Sugestão" placeholder="Encaminhamento sugerido..." value={form.sugestao || ""} onChange={(v) => setForm((f) => ({ ...f, sugestao: v }))} />
         </div>
