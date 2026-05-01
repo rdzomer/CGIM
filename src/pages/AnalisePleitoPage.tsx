@@ -19,7 +19,7 @@ import {
 } from "../services/historicoAnalisesService";
 import { makeAtribuicaoId } from "../services/atribuicoesService";
 import { norm, normKey, only8, formatNcm8 } from "../utils/stringUtils";
-import { analisarComercioComGemini } from "../services/geminiComercioService";
+import { analisarComercioComGemini, gerarAnaliseTecnica } from "../services/geminiComercioService";
 
 /* ----------------------------- Tipos ----------------------------- */
 type Analise = { resumo?: string; comercio?: string; tecnica?: string; sugestao?: string };
@@ -228,6 +228,7 @@ const AnalisePleitoPage: React.FC = () => {
 
   const [copiedSei, setCopiedSei] = useState<string | null>(null);
   const [geminiLoading, setGeminiLoading] = useState(false);
+  const [tecnicaLoading, setTecnicaLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const ncmAtual = ncmQS || atr?.ncm || "";
@@ -252,6 +253,19 @@ const AnalisePleitoPage: React.FC = () => {
       setGeminiLoading(false);
     }
   }, [ncmAtual]);
+
+  const handleGerarTecnica = useCallback(async () => {
+    setTecnicaLoading(true);
+    try {
+      const resultado = await gerarAnaliseTecnica(form.resumo || "", form.comercio || "", ncmAtual);
+      setForm((f) => ({ ...f, tecnica: resultado }));
+      toast.success("Análise técnica gerada com sucesso!");
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao gerar análise técnica");
+    } finally {
+      setTecnicaLoading(false);
+    }
+  }, [form.resumo, form.comercio, ncmAtual]);
 
   const [prevIdMigrated, setPrevIdMigrated] = useState<string | null>(null);
   const [isRetificadora, setIsRetificadora] = useState<boolean>(false);
@@ -940,7 +954,28 @@ const AnalisePleitoPage: React.FC = () => {
               onChange={handleGeminiFile}
             />
           </div>
-          <Field label="Análise técnica" placeholder="Análise integrada das alegações do pleiteante e contestações em confronto com os dados de comércio exterior..." value={form.tecnica || ""} onChange={(v) => setForm((f) => ({ ...f, tecnica: v }))} />
+          {/* Análise técnica com geração via Gemini */}
+          <div>
+            <label className="text-sm text-gray-600">Análise técnica</label>
+            <textarea
+              className="mt-1 w-full rounded border px-3 py-2"
+              rows={6}
+              placeholder="Análise integrada das alegações do pleiteante e contestações em confronto com os dados de comércio exterior..."
+              value={form.tecnica || ""}
+              onChange={(e) => setForm((f) => ({ ...f, tecnica: e.target.value }))}
+            />
+            <button
+              type="button"
+              disabled={tecnicaLoading || (!form.resumo?.trim() && !form.comercio?.trim())}
+              onClick={handleGerarTecnica}
+              title={!form.resumo?.trim() && !form.comercio?.trim() ? "Preencha o Resumo ou a Análise de comércio primeiro" : ""}
+              className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
+            >
+              {tecnicaLoading
+                ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
+                : <><Sparkles size={13} /> Gerar com IA</>}
+            </button>
+          </div>
           <Field label="Sugestão" placeholder="Encaminhamento sugerido..." value={form.sugestao || ""} onChange={(v) => setForm((f) => ({ ...f, sugestao: v }))} />
         </div>
 

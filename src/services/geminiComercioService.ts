@@ -166,3 +166,83 @@ export async function analisarComercioComGemini(file: File, ncm: string): Promis
   if (!result) throw new Error('Gemini não retornou texto. Verifique o documento enviado.');
   return result.trim();
 }
+
+export async function gerarAnaliseTecnica(
+  resumo: string,
+  comercio: string,
+  ncm: string,
+): Promise<string> {
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+  if (!apiKey) throw new Error('Chave VITE_GEMINI_API_KEY não encontrada no .env.local');
+  if (!resumo.trim() && !comercio.trim())
+    throw new Error('Preencha ao menos o Resumo ou a Análise de comércio antes de gerar a análise técnica.');
+
+  const prompt = `Você é um analista técnico sênior do CGIM/MDIC (Coordenação-Geral de Importações \
+de Metais e Insumos, Ministério do Desenvolvimento, Indústria, Comércio e Serviços do Brasil).
+
+Com base no contexto do pleito e nos dados de comércio exterior fornecidos abaixo, redija \
+a ANÁLISE TÉCNICA integrada, seguindo o padrão CGIM/MDIC.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONTEXTO DO PLEITO (NCM ${ncm || '[NCM]'}):
+${resumo || '(não preenchido)'}
+
+ANÁLISE DE COMÉRCIO EXTERIOR:
+${comercio || '(não preenchida)'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ESTRUTURA OBRIGATÓRIA (2 a 3 parágrafos):
+
+§1 – CONFRONTO ENTRE ALEGAÇÕES DO PLEITEANTE E DADOS DE COMÉRCIO:
+• Examine se os dados de comércio exterior corroboram, contradizem ou relativizam \
+as alegações e justificativas apresentadas pelo pleiteante.
+• Aponte convergências e divergências entre o argumento do pleiteante e os fluxos \
+observados (volume, valor, preço médio, origem).
+• Seja preciso: indique quais alegações encontram suporte nos dados e quais não encontram.
+
+§2 – AVALIAÇÃO TÉCNICA INTEGRADA:
+• Síntese sobre o mérito técnico do pedido à luz dos dados apresentados.
+• Considere aspectos de concorrência, política tarifária e eventual risco de desabastecimento.
+• Quando aplicável, mencione a possibilidade de instrumentos alternativos (ex.: destaque \
+tarifário, medidas de salvaguarda, criação de subposição específica).
+
+§3 – PONTOS DE ATENÇÃO E RECOMENDAÇÃO DE ACOMPANHAMENTO (se houver):
+• Aspectos que demandam cautela, dados insuficientes ou monitoramento adicional.
+• Se não houver pontos de atenção relevantes, OMITA este parágrafo.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DIRETRIZES DE TOM:
+• Linguagem técnica, objetiva e institucional — voltada a subsidiar decisão de política tarifária.
+• Distinguir com nitidez: fatos observados × interpretações plausíveis × pontos de cautela.
+• Não afirme tendência sem suporte em múltiplos períodos; prefira "oscilação" ou "variação \
+pontual" para movimentos isolados.
+• Proporcional nos adjetivos: evite "dependência absoluta" ou "vulnerabilidade crítica" \
+sem respaldo nos dados.
+• Não repita os dados numéricos já detalhados na Análise de Comércio — referencie-os, \
+não os transcreva.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REGRAS ABSOLUTAS:
+1. Baseie-se APENAS nos textos fornecidos. Não invente dados ou alegações.
+2. Responda SOMENTE com os parágrafos da análise: sem títulos, sem bullets, sem markdown.
+3. Texto corrido. Parágrafos separados por linha em branco. Máximo 3 parágrafos.`;
+
+  const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0, maxOutputTokens: 4096 },
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as any;
+    throw new Error(`Gemini ${res.status}: ${err?.error?.message ?? res.statusText}`);
+  }
+
+  const data = await res.json() as any;
+  const result: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  if (!result) throw new Error('Gemini não retornou texto.');
+  return result.trim();
+}
