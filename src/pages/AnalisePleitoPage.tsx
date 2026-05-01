@@ -914,32 +914,30 @@ const AnalisePleitoPage: React.FC = () => {
           <Field label="Resumo" placeholder="Escreva um resumo objetivo do pedido e do contexto..." value={form.resumo || ""} onChange={(v) => setForm((f) => ({ ...f, resumo: v }))} />
           {/* Análise de comércio com geração via Gemini */}
           <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-sm text-gray-600">Análise de comércio</label>
-              <button
-                type="button"
-                disabled={geminiLoading}
-                onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
-              >
-                {geminiLoading
-                  ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
-                  : <><Sparkles size={13} /> Gerar com IA</>}
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".docx"
-                className="hidden"
-                onChange={handleGeminiFile}
-              />
-            </div>
+            <label className="text-sm text-gray-600">Análise de comércio</label>
             <textarea
-              className="w-full rounded border px-3 py-2"
+              className="mt-1 w-full rounded border px-3 py-2"
               rows={6}
-              placeholder="Aspectos de comércio exterior, impactos, etc... (ou clique em 'Gerar com IA' para preencher automaticamente a partir de uma ficha .docx)"
+              placeholder="Aspectos de comércio exterior, impactos, etc..."
               value={form.comercio || ""}
               onChange={(e) => setForm((f) => ({ ...f, comercio: e.target.value }))}
+            />
+            <button
+              type="button"
+              disabled={geminiLoading}
+              onClick={() => fileInputRef.current?.click()}
+              className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
+            >
+              {geminiLoading
+                ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
+                : <><Sparkles size={13} /> Gerar com IA (.docx)</>}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".docx"
+              className="hidden"
+              onChange={handleGeminiFile}
             />
           </div>
           <Field label="Análise técnica" placeholder="Análise integrada das alegações do pleiteante e contestações em confronto com os dados de comércio exterior..." value={form.tecnica || ""} onChange={(v) => setForm((f) => ({ ...f, tecnica: v }))} />
