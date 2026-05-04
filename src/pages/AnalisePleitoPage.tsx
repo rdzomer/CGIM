@@ -20,6 +20,7 @@ import {
 import { makeAtribuicaoId } from "../services/atribuicoesService";
 import { norm, normKey, only8, formatNcm8 } from "../utils/stringUtils";
 import { analisarComercioComGemini, gerarAnaliseTecnica } from "../services/geminiComercioService";
+import { getFichaArrayBuffer, getFichaUrl } from "../services/fichasStorageService";
 
 /* ----------------------------- Tipos ----------------------------- */
 type Analise = { resumo?: string; comercio?: string; tecnica?: string; sugestao?: string };
@@ -229,9 +230,16 @@ const AnalisePleitoPage: React.FC = () => {
   const [copiedSei, setCopiedSei] = useState<string | null>(null);
   const [geminiLoading, setGeminiLoading] = useState(false);
   const [tecnicaLoading, setTecnicaLoading] = useState(false);
+  const [fichaDisponivel, setFichaDisponivel] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const ncmAtual = ncmQS || atr?.ncm || "";
+
+  // Verifica silenciosamente se já existe ficha pré-carregada no Storage
+  useEffect(() => {
+    if (!pautaIdQS || !ncmAtual) return;
+    getFichaUrl(pautaIdQS, ncmAtual).then((url) => setFichaDisponivel(!!url)).catch(() => {});
+  }, [pautaIdQS, ncmAtual]);
 
   const handleGeminiFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -253,6 +261,25 @@ const AnalisePleitoPage: React.FC = () => {
       setGeminiLoading(false);
     }
   }, [ncmAtual]);
+
+  // Usa a ficha pré-carregada no Storage (sem upload manual)
+  const handleGeminiStorage = useCallback(async () => {
+    setGeminiLoading(true);
+    try {
+      const buf = await getFichaArrayBuffer(pautaIdQS, ncmAtual);
+      if (!buf) throw new Error("Ficha não encontrada no servidor. Faça o upload manualmente.");
+      const file = new File([buf], `Ficha_Individual_da_NCM_${ncmAtual}.docx`, {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+      const resultado = await analisarComercioComGemini(file, ncmAtual);
+      setForm((f) => ({ ...f, comercio: resultado }));
+      toast.success("Análise gerada com sucesso!");
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao gerar análise com IA");
+    } finally {
+      setGeminiLoading(false);
+    }
+  }, [pautaIdQS, ncmAtual]);
 
   const handleGerarTecnica = useCallback(async () => {
     setTecnicaLoading(true);
@@ -936,23 +963,49 @@ const AnalisePleitoPage: React.FC = () => {
               value={form.comercio || ""}
               onChange={(e) => setForm((f) => ({ ...f, comercio: e.target.value }))}
             />
-            <button
-              type="button"
-              disabled={geminiLoading}
-              onClick={() => fileInputRef.current?.click()}
-              className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
-            >
-              {geminiLoading
-                ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
-                : <><Sparkles size={13} /> Gerar com IA (.docx)</>}
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".docx"
-              className="hidden"
-              onChange={handleGeminiFile}
-            />
+            <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+              {fichaDisponivel ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={geminiLoading}
+                    onClick={handleGeminiStorage}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
+                  >
+                    {geminiLoading
+                      ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
+                      : <><Sparkles size={13} /> Gerar com IA</>}
+                  </button>
+                  <span className="text-xs text-green-700 font-medium">✓ Ficha disponível</span>
+                  <button
+                    type="button"
+                    disabled={geminiLoading}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="text-xs text-gray-400 hover:text-gray-600 underline"
+                  >
+                    usar outro arquivo
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  disabled={geminiLoading}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
+                >
+                  {geminiLoading
+                    ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
+                    : <><Sparkles size={13} /> Gerar com IA (.docx)</>}
+                </button>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".docx"
+                className="hidden"
+                onChange={handleGeminiFile}
+              />
+            </div>
           </div>
           {/* Análise técnica com geração via Gemini */}
           <div>
