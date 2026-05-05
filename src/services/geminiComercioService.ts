@@ -167,6 +167,47 @@ export async function analisarComercioComGemini(file: File, ncm: string): Promis
   return result.trim();
 }
 
+// Gera análise de comércio a partir de dados estruturados da ComexStat (sem arquivo)
+export async function gerarAnaliseComercioComexstat(
+  dadosComexstat: string,
+  ncm: string,
+): Promise<string> {
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+  if (!apiKey) throw new Error('Chave VITE_GEMINI_API_KEY não encontrada no .env.local');
+
+  const prompt = `${buildPrompt(ncm)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DADOS ESTRUTURADOS DA COMEXSTAT (use estes números — são exatos):
+
+${dadosComexstat}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+IMPORTANTE: os dados acima foram extraídos diretamente da API ComexStat/MDIC. \
+Use os números exatamente como estão — não arredonde nem estime. \
+As referências temporais já estão calculadas nos dados (períodos, anos, meses). \
+Use-as diretamente em vez das estimativas do prompt.`;
+
+  const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0, maxOutputTokens: 8192 },
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as any;
+    throw new Error(`Gemini ${res.status}: ${err?.error?.message ?? res.statusText}`);
+  }
+
+  const data = await res.json() as any;
+  const result: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  if (!result) throw new Error('Gemini não retornou texto.');
+  return result.trim();
+}
+
 export async function gerarAnaliseTecnica(
   resumo: string,
   comercio: string,

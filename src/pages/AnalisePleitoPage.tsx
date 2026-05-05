@@ -19,7 +19,8 @@ import {
 } from "../services/historicoAnalisesService";
 import { makeAtribuicaoId } from "../services/atribuicoesService";
 import { norm, normKey, only8, formatNcm8 } from "../utils/stringUtils";
-import { analisarComercioComGemini, gerarAnaliseTecnica } from "../services/geminiComercioService";
+import { analisarComercioComGemini, gerarAnaliseTecnica, gerarAnaliseComercioComexstat } from "../services/geminiComercioService";
+import { buscarDadosComexstat } from "../services/comexstatService";
 import { getFichaArrayBuffer, getFichaUrl } from "../services/fichasStorageService";
 
 /* ----------------------------- Tipos ----------------------------- */
@@ -230,6 +231,7 @@ const AnalisePleitoPage: React.FC = () => {
   const [copiedSei, setCopiedSei] = useState<string | null>(null);
   const [geminiLoading, setGeminiLoading] = useState(false);
   const [tecnicaLoading, setTecnicaLoading] = useState(false);
+  const [comexstatLoading, setComexstatLoading] = useState(false);
   const [fichaDisponivel, setFichaDisponivel] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -280,6 +282,23 @@ const AnalisePleitoPage: React.FC = () => {
       setGeminiLoading(false);
     }
   }, [pautaIdQS, ncmAtual]);
+
+  const handleComexstat = useCallback(async () => {
+    if (!ncmAtual) { toast.error("NCM não identificado para este pleito."); return; }
+    setComexstatLoading(true);
+    try {
+      toast.loading("Buscando dados na ComexStat…", { id: "comexstat" });
+      const dados = await buscarDadosComexstat(ncmAtual);
+      toast.loading("Gerando análise com IA…", { id: "comexstat" });
+      const resultado = await gerarAnaliseComercioComexstat(dados, ncmAtual);
+      setForm((f) => ({ ...f, comercio: resultado }));
+      toast.success("Análise gerada com dados da ComexStat!", { id: "comexstat" });
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao buscar dados da ComexStat", { id: "comexstat" });
+    } finally {
+      setComexstatLoading(false);
+    }
+  }, [ncmAtual]);
 
   const handleGerarTecnica = useCallback(async () => {
     setTecnicaLoading(true);
@@ -964,40 +983,58 @@ const AnalisePleitoPage: React.FC = () => {
               onChange={(e) => setForm((f) => ({ ...f, comercio: e.target.value }))}
             />
             <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+              {/* Opção 1 — ComexStat (primária, sem arquivo) */}
+              <button
+                type="button"
+                disabled={comexstatLoading || geminiLoading || !ncmAtual}
+                onClick={handleComexstat}
+                title={!ncmAtual ? "NCM não identificado para este pleito" : "Busca dados direto da API ComexStat/MDIC e gera a análise"}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700 disabled:opacity-60 transition-colors"
+              >
+                {comexstatLoading
+                  ? <><Loader2 size={13} className="animate-spin" /> Buscando…</>
+                  : <><Sparkles size={13} /> Gerar via ComexStat</>}
+              </button>
+
+              {/* Separador visual */}
+              <span className="text-gray-300 text-xs">|</span>
+
+              {/* Opção 2 — Ficha do Storage ou upload manual */}
               {fichaDisponivel ? (
                 <>
                   <button
                     type="button"
-                    disabled={geminiLoading}
+                    disabled={geminiLoading || comexstatLoading}
                     onClick={handleGeminiStorage}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
                   >
                     {geminiLoading
                       ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
-                      : <><Sparkles size={13} /> Gerar com IA</>}
+                      : <><Sparkles size={13} /> Usar ficha (.docx)</>}
                   </button>
                   <span className="text-xs text-green-700 font-medium">✓ Ficha disponível</span>
                   <button
                     type="button"
-                    disabled={geminiLoading}
+                    disabled={geminiLoading || comexstatLoading}
                     onClick={() => fileInputRef.current?.click()}
                     className="text-xs text-gray-400 hover:text-gray-600 underline"
                   >
-                    usar outro arquivo
+                    outro arquivo
                   </button>
                 </>
               ) : (
                 <button
                   type="button"
-                  disabled={geminiLoading}
+                  disabled={geminiLoading || comexstatLoading}
                   onClick={() => fileInputRef.current?.click()}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
                 >
                   {geminiLoading
                     ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
-                    : <><Sparkles size={13} /> Gerar com IA (.docx)</>}
+                    : <><Sparkles size={13} /> Usar ficha (.docx)</>}
                 </button>
               )}
+
               <input
                 ref={fileInputRef}
                 type="file"
