@@ -1,5 +1,5 @@
 // src/pages/AnalisePleitoPage.tsx
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   doc,
@@ -12,12 +12,16 @@ import {
 } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, User } from "firebase/auth";
 import toast from "react-hot-toast";
-import { FileText } from "lucide-react";
+import { FileText, Sparkles, Loader2 } from "lucide-react";
 import {
   getHistoricoByPleitoKey,
   upsertHistoricoFromAtribuicao,
 } from "../services/historicoAnalisesService";
 import { makeAtribuicaoId } from "../services/atribuicoesService";
+import { norm, normKey, only8, formatNcm8 } from "../utils/stringUtils";
+import { analisarComercioComGemini, gerarAnaliseTecnica, gerarAnaliseComercioComexstat } from "../services/geminiComercioService";
+import { buscarDadosComexstat } from "../services/comexstatService";
+import { getFichaArrayBuffer, getFichaUrl } from "../services/fichasStorageService";
 
 /* ----------------------------- Tipos ----------------------------- */
 type Analise = { resumo?: string; comercio?: string; tecnica?: string; sugestao?: string };
@@ -72,18 +76,6 @@ type PedidoExtraido = {
 };
 
 /* ----------------------------- Helpers ----------------------------- */
-const onlyDigits = (s?: string) => (s ?? "").replace(/\D+/g, "");
-const norm = (s?: any) => String(s ?? "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s?: any) =>
-  norm(s)
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-
-const fmtNCM = (s?: string) => {
-  const n8 = onlyDigits(s).slice(0, 8);
-  return n8.length === 8 ? `${n8.slice(0, 4)}.${n8.slice(4, 6)}.${n8.slice(6, 8)}` : (s || "—");
-};
 
 const HIDDEN_KEYS = /(key|pleitokey|__sec|_id|id|timestamp|created|updated|hash|vers[aã]o|revindex)/i;
 
@@ -152,7 +144,6 @@ function projectLinha(row: Record<string, any>) {
   const pleiteante = by(["Pleiteante","Requerente","Solicitante","Empresa"]);
   return { ncm, produto, pleiteante };
 }
-const only8 = (s?: any) => norm(s).replace(/\D+/g, "").slice(0, 8);
 function gerarPleitoKeyFromRow(row: any) {
   const { ncm, produto, pleiteante } = projectLinha(row);
   const key = [only8(ncm), norm(produto), norm(pleiteante)].filter(Boolean).join("|");
@@ -238,6 +229,89 @@ const AnalisePleitoPage: React.FC = () => {
   const [draftLoadedFrom, setDraftLoadedFrom] = useState<"histórico" | null>(null);
 
   const [copiedSei, setCopiedSei] = useState<string | null>(null);
+  const [geminiLoading, setGeminiLoading] = useState(false);
+  const [tecnicaLoading, setTecnicaLoading] = useState(false);
+  const [comexstatLoading, setComexstatLoading] = useState(false);
+  const [fichaDisponivel, setFichaDisponivel] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const ncmAtual = ncmQS || atr?.ncm || "";
+
+  // Verifica silenciosamente se já existe ficha pré-carregada no Storage
+  useEffect(() => {
+    if (!pautaIdQS || !ncmAtual) return;
+    getFichaUrl(pautaIdQS, ncmAtual).then((url) => setFichaDisponivel(!!url)).catch(() => {});
+  }, [pautaIdQS, ncmAtual]);
+
+  const handleGeminiFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!fileInputRef.current) return;
+    fileInputRef.current.value = "";
+    if (!file) return;
+    if (!file.name.endsWith(".docx")) {
+      toast.error("Selecione um arquivo .docx");
+      return;
+    }
+    setGeminiLoading(true);
+    try {
+      const resultado = await analisarComercioComGemini(file, ncmAtual);
+      setForm((f) => ({ ...f, comercio: resultado }));
+      toast.success("Análise gerada com sucesso!");
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao gerar análise com IA");
+    } finally {
+      setGeminiLoading(false);
+    }
+  }, [ncmAtual]);
+
+  // Usa a ficha pré-carregada no Storage (sem upload manual)
+  const handleGeminiStorage = useCallback(async () => {
+    setGeminiLoading(true);
+    try {
+      const buf = await getFichaArrayBuffer(pautaIdQS, ncmAtual);
+      if (!buf) throw new Error("Ficha não encontrada no servidor. Faça o upload manualmente.");
+      const file = new File([buf], `Ficha_Individual_da_NCM_${ncmAtual}.docx`, {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+      const resultado = await analisarComercioComGemini(file, ncmAtual);
+      setForm((f) => ({ ...f, comercio: resultado }));
+      toast.success("Análise gerada com sucesso!");
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao gerar análise com IA");
+    } finally {
+      setGeminiLoading(false);
+    }
+  }, [pautaIdQS, ncmAtual]);
+
+  const handleComexstat = useCallback(async () => {
+    if (!ncmAtual) { toast.error("NCM não identificado para este pleito."); return; }
+    setComexstatLoading(true);
+    try {
+      toast.loading("Buscando dados na ComexStat…", { id: "comexstat" });
+      const dados = await buscarDadosComexstat(ncmAtual);
+      toast.loading("Gerando análise com IA…", { id: "comexstat" });
+      const resultado = await gerarAnaliseComercioComexstat(dados, ncmAtual);
+      setForm((f) => ({ ...f, comercio: resultado }));
+      toast.success("Análise gerada com dados da ComexStat!", { id: "comexstat" });
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao buscar dados da ComexStat", { id: "comexstat" });
+    } finally {
+      setComexstatLoading(false);
+    }
+  }, [ncmAtual]);
+
+  const handleGerarTecnica = useCallback(async () => {
+    setTecnicaLoading(true);
+    try {
+      const resultado = await gerarAnaliseTecnica(form.resumo || "", form.comercio || "", ncmAtual);
+      setForm((f) => ({ ...f, tecnica: resultado }));
+      toast.success("Análise técnica gerada com sucesso!");
+    } catch (err: any) {
+      toast.error(err?.message ?? "Erro ao gerar análise técnica");
+    } finally {
+      setTecnicaLoading(false);
+    }
+  }, [form.resumo, form.comercio, ncmAtual]);
 
   const [prevIdMigrated, setPrevIdMigrated] = useState<string | null>(null);
   const [isRetificadora, setIsRetificadora] = useState<boolean>(false);
@@ -569,7 +643,7 @@ const AnalisePleitoPage: React.FC = () => {
       );
 
       // Histórico
-      try { await upsertHistoricoFromAtribuicao(db, targetDocId); } catch {}
+      try { await upsertHistoricoFromAtribuicao(db, { id: targetDocId }); } catch {}
 
       toast.success(status === "Concluído" ? "Análise concluída." : "Análise salva.");
 
@@ -781,7 +855,7 @@ const AnalisePleitoPage: React.FC = () => {
               Seção: <span className="font-medium">{atr.tituloSecao || tituloSecaoQS || "—"}</span>
             </div>
             <h1 className="mt-1 text-xl font-semibold">
-              {fmtNCM(atr.ncm || ncmQS)} — {atr.produto || produtoQS || "Produto não identificado"}
+              {formatNcm8(atr.ncm || ncmQS)} — {atr.produto || produtoQS || "Produto não identificado"}
             </h1>
             <div className="text-sm text-gray-600 mt-1">
               <span className="font-medium">Pleiteante:</span> {atr.pleiteante || pleiteanteQS || "—"}
@@ -825,7 +899,7 @@ const AnalisePleitoPage: React.FC = () => {
         </div>
 
         <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Info label="NCM" value={fmtNCM(atr.ncm || ncmQS)} />
+          <Info label="NCM" value={formatNcm8(atr.ncm || ncmQS)} />
           <Info label="Tipo de Pleito" value={atr.tipoPleito || tipoPleitoQS || "—"} />
           <Info label="Produto (pleito)" value={atr.produto || produtoQS || "—"} className="md:col-span-2" />
           <Info label="Pleiteante" value={atr.pleiteante || pleiteanteQS || "—"} className="md:col-span-2" />
@@ -898,8 +972,100 @@ const AnalisePleitoPage: React.FC = () => {
 
         <div className="mt-3 grid grid-cols-1 gap-4">
           <Field label="Resumo" placeholder="Escreva um resumo objetivo do pedido e do contexto..." value={form.resumo || ""} onChange={(v) => setForm((f) => ({ ...f, resumo: v }))} />
-          <Field label="Análise de comércio" placeholder="Aspectos de comércio exterior, impactos, etc..." value={form.comercio || ""} onChange={(v) => setForm((f) => ({ ...f, comercio: v }))} />
-          <Field label="Análise técnica" placeholder="Exame técnico do produto, norma, classificação etc..." value={form.tecnica || ""} onChange={(v) => setForm((f) => ({ ...f, tecnica: v }))} />
+          {/* Análise de comércio com geração via Gemini */}
+          <div>
+            <label className="text-sm text-gray-600">Análise de comércio</label>
+            <textarea
+              className="mt-1 w-full rounded border px-3 py-2"
+              rows={6}
+              placeholder="Aspectos de comércio exterior, impactos, etc..."
+              value={form.comercio || ""}
+              onChange={(e) => setForm((f) => ({ ...f, comercio: e.target.value }))}
+            />
+            <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+              {/* Opção 1 — ComexStat (primária, sem arquivo) */}
+              <button
+                type="button"
+                disabled={comexstatLoading || geminiLoading || !ncmAtual}
+                onClick={handleComexstat}
+                title={!ncmAtual ? "NCM não identificado para este pleito" : "Busca dados direto da API ComexStat/MDIC e gera a análise"}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700 disabled:opacity-60 transition-colors"
+              >
+                {comexstatLoading
+                  ? <><Loader2 size={13} className="animate-spin" /> Buscando…</>
+                  : <><Sparkles size={13} /> Gerar via ComexStat</>}
+              </button>
+
+              {/* Separador visual */}
+              <span className="text-gray-300 text-xs">|</span>
+
+              {/* Opção 2 — Ficha do Storage ou upload manual */}
+              {fichaDisponivel ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={geminiLoading || comexstatLoading}
+                    onClick={handleGeminiStorage}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
+                  >
+                    {geminiLoading
+                      ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
+                      : <><Sparkles size={13} /> Usar ficha (.docx)</>}
+                  </button>
+                  <span className="text-xs text-green-700 font-medium">✓ Ficha disponível</span>
+                  <button
+                    type="button"
+                    disabled={geminiLoading || comexstatLoading}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="text-xs text-gray-400 hover:text-gray-600 underline"
+                  >
+                    outro arquivo
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  disabled={geminiLoading || comexstatLoading}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
+                >
+                  {geminiLoading
+                    ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
+                    : <><Sparkles size={13} /> Usar ficha (.docx)</>}
+                </button>
+              )}
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".docx"
+                className="hidden"
+                onChange={handleGeminiFile}
+              />
+            </div>
+          </div>
+          {/* Análise técnica com geração via Gemini */}
+          <div>
+            <label className="text-sm text-gray-600">Análise técnica</label>
+            <textarea
+              className="mt-1 w-full rounded border px-3 py-2"
+              rows={6}
+              placeholder="Análise integrada das alegações do pleiteante e contestações em confronto com os dados de comércio exterior..."
+              value={form.tecnica || ""}
+              onChange={(e) => setForm((f) => ({ ...f, tecnica: e.target.value }))}
+            />
+            <button
+              type="button"
+              disabled={tecnicaLoading || (!form.resumo?.trim() && !form.comercio?.trim())}
+              onClick={handleGerarTecnica}
+              title={!form.resumo?.trim() && !form.comercio?.trim() ? "Preencha o Resumo ou a Análise de comércio primeiro" : ""}
+              className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
+            >
+              {tecnicaLoading
+                ? <><Loader2 size={13} className="animate-spin" /> Analisando…</>
+                : <><Sparkles size={13} /> Gerar com IA</>}
+            </button>
+          </div>
           <Field label="Sugestão" placeholder="Encaminhamento sugerido..." value={form.sugestao || ""} onChange={(v) => setForm((f) => ({ ...f, sugestao: v }))} />
         </div>
 
@@ -984,3 +1150,4 @@ function Field(props: { label: string; placeholder?: string; value: string; onCh
     </div>
   );
 }
+

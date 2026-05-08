@@ -27,3 +27,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+metadata.json
+*.lnk

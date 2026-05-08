@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getFirestore, collection, getDocs, deleteDoc, doc } from "firebase/firestore";
 import { getNcmSetCgim } from "../services/ncmsService";
+import { norm, only8, toMillis } from "../utils/stringUtils";
 
 type PautaRow = Record<string, any>;
 
@@ -31,18 +32,7 @@ type RawPauta = {
 
 const db = getFirestore();
 
-const norm = (s?: string) => (s ?? "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const only8 = (s?: string) => (s ?? "").replace(/\D+/g, "").slice(0, 8);
 const safeStr = (v: any, fallback = "—") => (v == null ? fallback : (typeof v === "string" ? (v || fallback) : String(v)));
-
-const toMillis = (t: any): number => {
-  if (!t) return 0;
-  if (typeof t === "number") return t;
-  if (t instanceof Date) return t.getTime();
-  if (t?.toDate) return t.toDate().getTime?.() || 0;
-  if (t?.seconds) return t.seconds * 1000 + (t.nanoseconds || 0) / 1e6;
-  return 0;
-};
 
 const uploadTs = (p: any) => toMillis(p.createdAt) || toMillis(p.updatedAt) || toMillis(p.meetingDate);
 

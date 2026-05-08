@@ -8,8 +8,6 @@ import {
   query,
   where,
   documentId,
-  orderBy,
-  limit,
   Query,
   DocumentData,
 } from "firebase/firestore";
@@ -23,6 +21,7 @@ import {
   Legend as ReLegend,
 } from "recharts";
 import { makeAtribuicaoId, gerarPleitoKey } from "../services/atribuicoesService";
+import { norm, normKey, only8, onlyDigits, toMillis, normalizeStatus, formatNcm8 } from "../utils/stringUtils";
 
 /* ==================== Tipos ==================== */
 type MiniUser = { uid?: string; email?: string; nome?: string } | null;
@@ -92,34 +91,11 @@ type PautaDoc = {
 };
 
 /* ==================== Helpers ==================== */
-const norm = (s?: string) => (s ?? "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s?: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-const onlyDigits = (s?: string) => (s ?? "").replace(/\D+/g, "");
 const renderStr = (v: any, fallback = "—") =>
   typeof v === "string" ? (norm(v) || fallback) : typeof v === "number" ? String(v) : fallback;
 
-const toMillis = (t: any): number => {
-  if (!t) return 0;
-  if (typeof t === "number") return t;
-  if (t instanceof Date) return t.getTime();
-  if (t?.toDate) return t.toDate().getTime?.() || 0;
-  if (t?.seconds) return t.seconds * 1000 + (t.nanoseconds || 0) / 1e6;
-  return 0;
-};
 const uploadTs = (p: Partial<PautaDoc>) =>
   toMillis(p.createdAt) || toMillis(p.updatedAt) || toMillis(p.meetingDate);
-
-const normalizeStatus = (s?: string) => {
-  const v = (s || "").toLowerCase();
-  if (/conclu[ií]d/.test(v)) return "concluido";
-  if (/em[\s_ ]?an[aá]lis/.test(v)) return "em_analise";
-  return "nao_iniciado";
-};
-
-const fmtNCM = (s?: string) => {
-  const n8 = onlyDigits(s).slice(0, 8);
-  return n8.length === 8 ? `${n8.slice(0, 4)}.${n8.slice(4, 6)}.${n8.slice(6, 8)}` : renderStr(s);
-};
 
 function emailToLikelyNames(email?: string): string[] {
   if (!email) return [];
@@ -173,7 +149,7 @@ function projectLinha(row: AnyRow) {
 
 function tryMakeKeyFromRow(row: AnyRow): string {
   const { ncm, produto, pleiteante } = projectLinha(row);
-  const n8 = onlyDigits(ncm).slice(0, 8);
+  const n8 = only8(ncm);
   try {
     const k = gerarPleitoKey({ NCM: n8, Produto: produto || "", Pleiteante: pleiteante || "" });
     if (k) return String(k);
@@ -452,7 +428,7 @@ const reaproveitoCache = new Map<string, string | null>(); // chave-composta -> 
 /** NOVO: tenta por pleitoKey; se não achar, cai para NCM(8) + Produto normalizado */
 async function findBestPriorAnalysisId(db: any, t: Atribuicao, excludePautaId?: string): Promise<string | null> {
   const k = (t.pleitoKey || "").trim();
-  const n8 = onlyDigits(t.ncm).slice(0, 8);
+  const n8 = only8(t.ncm);
   const prodNk = normKey(t.produto || "");
   const pltNk = normKey(t.pleiteante || "");
 
@@ -576,7 +552,6 @@ const MinhasTarefasPage: React.FC = () => {
 
   const [loading, setLoading] = useState(true);
   const [tarefas, setTarefas] = useState<Atribuicao[]>([]);
-  const [copyLoading, setCopyLoading] = useState<Record<string, boolean>>({});
   const [priorMap, setPriorMap] = useState<Record<string, string | null>>({});
 
   const [pautas, setPautas] = useState<PautaDoc[]>([]);
@@ -651,7 +626,7 @@ const MinhasTarefasPage: React.FC = () => {
 
         const byScopedKey = new Map<string, Atribuicao>();
         for (const a of mineScoped) {
-          const ncm8 = onlyDigits(a.ncm).slice(0, 8);
+          const ncm8 = only8(a.ncm);
           const produtoNk = normKey(a.produto || "");
           const scopedKey = `${norm(a.pautaId)}|${norm(a.pleitoKey) || `${ncm8}|${produtoNk}`}`;
           const prev = byScopedKey.get(scopedKey);
@@ -693,7 +668,7 @@ const MinhasTarefasPage: React.FC = () => {
             }
 
             if (!found) {
-              const n8 = onlyDigits(t.ncm).slice(0, 8);
+              const n8 = only8(t.ncm);
               const prodNk = normKey(t.produto || "");
               found = rows.find((r) => {
                 const pr = projectLinha(r);
@@ -746,7 +721,7 @@ const MinhasTarefasPage: React.FC = () => {
           const keyFor = (t: Atribuicao) => {
             const k = String(t.pleitoKey || "");
             if (k) return k;
-            const n8 = onlyDigits(t.ncm).slice(0, 8);
+            const n8 = only8(t.ncm);
             try {
               return String(gerarPleitoKey({ NCM: n8, Produto: t.produto || "", Pleiteante: t.pleiteante || "" }));
             } catch {}
@@ -979,7 +954,7 @@ const MinhasTarefasPage: React.FC = () => {
                       <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
                         <div className="space-y-1">
                           <div className="text-xs text-gray-500">NCM</div>
-                          <div className="font-medium">{fmtNCM(t.ncm)}</div>
+                          <div className="font-medium">{formatNcm8(t.ncm)}</div>
                         </div>
                         <div className="space-y-1">
                           <div className="text-xs text-gray-500">Tipo de Pleito</div>
@@ -999,9 +974,8 @@ const MinhasTarefasPage: React.FC = () => {
                           <button
                             className="px-3 py-1.5 rounded border text-sm hover:bg-gray-100"
                             onClick={() => onReaproveitar(t)}
-                            disabled={!!copyLoading[t.id]}
                           >
-                            {copyLoading[t.id] ? "Abrindo…" : "Reaproveitar análise anterior"}
+                            Reaproveitar análise anterior
                           </button>
                         )}
                       </div>

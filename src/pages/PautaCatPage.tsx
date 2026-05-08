@@ -34,14 +34,17 @@ import {
 
 // >>> serviço de versionamento/diff entre pautas
 import { diffPautas } from "../services/pautaVersioningCompat";
+import { norm, normKey, only8, onlyDigits } from "../utils/stringUtils";
+import {
+  uploadFichas,
+  ncmFromFichaFilename,
+  type UploadResult,
+} from "../services/fichasStorageService";
 
 // ---------------- ANALISTAS PADRÃO ----------------
 const ANALISTAS = ["Ricardo Zomer", "Pedro Reckziegel", "Antônio Azambuja", "Tólio Ribeiro"] as const;
 
 // ---------------- helpers ----------------
-const norm = (s: string) => (s || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-function onlyDigits(s: string | undefined | null): string { if (!s) return ""; return String(s).replace(/\D+/g, ""); }
 
 function isHeaderLikely(h: string) {
   const k = normKey(h);
@@ -299,6 +302,10 @@ const PautaCatPage: React.FC = () => {
   const [atribs, setAtribs] = useState<Record<string, string>>({}); // pleitoKey -> responsavelNome
 
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const fichasInputRef = useRef<HTMLInputElement | null>(null);
+  const [fichasPendentes, setFichasPendentes] = useState<File[]>([]);
+  const [fichasUploading, setFichasUploading] = useState(false);
+  const [fichasResultado, setFichasResultado] = useState<UploadResult[] | null>(null);
 
   useEffect(() => {
     getNcmSetCgim().then(setNcmSet).catch(() => setNcmSet(new Set()));
@@ -670,6 +677,100 @@ const PautaCatPage: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Upload em lote de fichas .docx */}
+      {currentPautaId && (
+        <div className="mb-4 p-4 bg-white rounded border">
+          <h2 className="font-semibold mb-1">Fichas de comércio exterior (.docx)</h2>
+          <p className="text-sm text-gray-500 mb-3">
+            Suba as fichas individuais de todos os itens CGIM desta pauta. O nome deve seguir o padrão{" "}
+            <code className="bg-gray-100 px-1 rounded">Ficha_Individual_da_NCM_XXXXXXXX.docx</code>.
+            O sistema detecta o NCM automaticamente e associa à pauta atual.
+          </p>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              ref={fichasInputRef}
+              type="file"
+              accept=".docx"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                setFichasPendentes(files);
+                setFichasResultado(null);
+                e.currentTarget.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fichasInputRef.current?.click()}
+              className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded text-sm"
+            >
+              Selecionar fichas (.docx)
+            </button>
+
+            {fichasPendentes.length > 0 && (
+              <button
+                type="button"
+                disabled={fichasUploading}
+                onClick={async () => {
+                  setFichasUploading(true);
+                  try {
+                    const res = await uploadFichas(currentPautaId, fichasPendentes);
+                    setFichasResultado(res);
+                    const ok = res.filter((r) => r.ok).length;
+                    const fail = res.length - ok;
+                    if (fail === 0) toast.success(`${ok} ficha(s) enviada(s) com sucesso!`);
+                    else toast.error(`${ok} enviada(s), ${fail} com erro — verifique a lista.`);
+                    setFichasPendentes([]);
+                  } catch (e: any) {
+                    toast.error(e?.message ?? "Erro ao enviar fichas");
+                  } finally {
+                    setFichasUploading(false);
+                  }
+                }}
+                className="px-3 py-2 bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-60 rounded text-sm"
+              >
+                {fichasUploading ? "Enviando…" : `Enviar ${fichasPendentes.length} ficha(s)`}
+              </button>
+            )}
+          </div>
+
+          {/* Lista de arquivos selecionados (pré-upload) */}
+          {fichasPendentes.length > 0 && (
+            <ul className="mt-3 space-y-1">
+              {fichasPendentes.map((f) => {
+                const ncm = ncmFromFichaFilename(f.name);
+                return (
+                  <li key={f.name} className="flex items-center gap-2 text-sm">
+                    <span className={ncm ? "text-green-700 font-mono" : "text-red-600"}>
+                      {ncm ? `NCM ${ncm}` : "NCM não identificado"}
+                    </span>
+                    <span className="text-gray-500 truncate">{f.name}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          {/* Resultado do upload */}
+          {fichasResultado && fichasResultado.length > 0 && (
+            <ul className="mt-3 space-y-1">
+              {fichasResultado.map((r) => (
+                <li key={r.filename} className="flex items-center gap-2 text-sm">
+                  <span>{r.ok ? "✓" : "✗"}</span>
+                  <span className={r.ok ? "text-green-700 font-mono" : "text-red-600"}>
+                    {r.ncm ? `NCM ${r.ncm}` : "NCM não identificado"}
+                  </span>
+                  <span className="text-gray-500 truncate">{r.filename}</span>
+                  {r.erro && <span className="text-red-500 text-xs">— {r.erro}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* Histórico */}
       <div className="mb-6 p-4 bg-white rounded border">

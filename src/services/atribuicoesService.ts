@@ -11,6 +11,7 @@ import {
   where,
   getDocs,
 } from "firebase/firestore";
+import { norm } from "../utils/stringUtils";
 
 /** ---------------------------------------------
  * Helpers de normalização / ID seguro
@@ -30,8 +31,6 @@ export function makeAtribuicaoId(pleitoKey: string): string {
 
 const onlyDigits = (s: string | undefined | null) =>
   (s || "").replace(/\D+/g, "");
-const norm = (s: string | undefined | null) =>
-  (s || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 
 /** ---------------------------------------------
  * Chave do pleito (independente do nome exato das colunas)
