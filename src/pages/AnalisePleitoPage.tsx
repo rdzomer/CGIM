@@ -414,7 +414,7 @@ const AnalisePleitoPage: React.FC = () => {
             };
             setForm(copied);
           }
-        } catch {}
+        } catch (e) { console.warn("Falha ao copiar análise de origem:", e); }
       } else if (loaded?.analise) {
         setForm({
           resumo: loaded.analise?.resumo || "",
@@ -457,7 +457,7 @@ const AnalisePleitoPage: React.FC = () => {
             setDraftLoadedFrom("histórico");
           }
         }
-      } catch {}
+      } catch (e) { console.warn("Falha ao carregar rascunho do histórico:", e); }
 
       // 6) Monta ficha a partir da linha da pauta
       const base: any = (loaded as any)?.linhaPauta || {};
@@ -479,7 +479,7 @@ const AnalisePleitoPage: React.FC = () => {
           const ps = await getDoc(doc(db, "pleitos", pk));
           if (ps.exists()) pleitoDocData = ps.data();
         }
-      } catch {}
+      } catch (e) { console.warn("Falha ao carregar doc do pleito:", e); }
 
       // 8) pedido primário (linha + doc pleito)
       let pedidoLocal = extrairPedidoAmplo(base, pleitoDocData);
@@ -514,7 +514,7 @@ const AnalisePleitoPage: React.FC = () => {
               setPedido(pedidoLocal);
             }
           }
-        } catch {}
+        } catch (e) { console.warn("Falha ao refinar pedido com dados da pauta:", e); }
       }
 
       // 10) Se abrimos com atrId legado e não existia targetDocId, migra para o novo

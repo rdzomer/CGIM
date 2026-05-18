@@ -119,9 +119,10 @@ export async function listarNcmsPorPrefixoPaginado(
 /**
  * Cache leve em memória para o Set de NCMs (evita varreduras repetidas).
  */
-const _setCache: { value: Set<string> | null; expires: number } = {
+const _setCache: { value: Set<string> | null; expires: number; loading: Promise<Set<string>> | null } = {
   value: null,
   expires: 0,
+  loading: null,
 };
 
 /**
@@ -131,30 +132,34 @@ const _setCache: { value: Set<string> | null; expires: number } = {
  */
 export async function getNcmSetCgim(): Promise<Set<string>> {
   const now = Date.now();
-  if (_setCache.value && _setCache.expires > now) {
-    return _setCache.value;
-  }
+  if (_setCache.value && _setCache.expires > now) return _setCache.value;
 
-  const s = new Set<string>();
-  let cursor: string | undefined = undefined;
+  // Se já há uma carga em andamento, aguarda o mesmo Promise em vez de disparar outra
+  if (_setCache.loading) return _setCache.loading;
 
-  // páginas grandes para reduzir round-trips
-  const PAGE = 3000;
+  _setCache.loading = (async () => {
+    const s = new Set<string>();
+    let cursor: string | undefined = undefined;
+    const PAGE = 3000;
 
-  while (true) {
-    const { items, nextCursor } = await listarNcmsPorPrefixoPaginado("", PAGE, cursor);
-    if (!items.length) break;
-    for (const it of items) {
-      const n8 = norm8(it.ncm);
-      if (n8) s.add(n8);
+    while (true) {
+      const { items, nextCursor } = await listarNcmsPorPrefixoPaginado("", PAGE, cursor);
+      if (!items.length) break;
+      for (const it of items) {
+        const n8 = norm8(it.ncm);
+        if (n8) s.add(n8);
+      }
+      if (!nextCursor) break;
+      cursor = nextCursor;
     }
-    if (!nextCursor) break;
-    cursor = nextCursor;
-  }
 
-  _setCache.value = s;
-  _setCache.expires = now + 5 * 60 * 1000; // 5 min
-  return s;
+    _setCache.value = s;
+    _setCache.expires = now + 5 * 60 * 1000; // 5 min
+    _setCache.loading = null;
+    return s;
+  })();
+
+  return _setCache.loading;
 }
 
 /**
@@ -163,6 +168,7 @@ export async function getNcmSetCgim(): Promise<Set<string>> {
 export function clearNcmSetCache() {
   _setCache.value = null;
   _setCache.expires = 0;
+  _setCache.loading = null;
 }
 
 /**

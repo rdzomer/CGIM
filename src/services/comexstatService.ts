@@ -187,23 +187,6 @@ export async function buscarDadosComexstat(ncm: string): Promise<DadosComexstat>
     metrics: ["metricFOB", "metricKG"],
   });
 
-  // Diagnostic: log which years and months the API actually returned
-  {
-    const ymMap: Record<number, number[]> = {};
-    for (const r of rows) {
-      const y = Number(r.year);
-      const m = Number(r.monthNumber ?? r.month ?? r.coMonth ?? 0);
-      if (!y || !m) continue;
-      if (!ymMap[y]) ymMap[y] = [];
-      if (!ymMap[y].includes(m)) ymMap[y].push(m);
-    }
-    const summary = Object.entries(ymMap)
-      .sort(([a], [b]) => Number(a) - Number(b))
-      .map(([y, ms]) => `${y}:[${ms.sort((a, b) => a - b).join(",")}]`)
-      .join("  ");
-    console.log(`[ComexStat] query ${fromYear}-01→${lastYear}-${monthPad} | lastYear=${lastYear} lastMonth=${lastMonth} | rows=${rows.length}`);
-    console.log(`[ComexStat] year/month distribution: ${summary}`);
-  }
 
   type V = { fob: number; kg: number };
 
@@ -212,11 +195,6 @@ export async function buscarDadosComexstat(ncm: string): Promise<DadosComexstat>
   const periodCurrC: Record<string, V> = {};
   const periodPrevC: Record<string, V> = {};
   const kgByYM:      Record<string, number> = {};
-
-  // Log first 3 rows to expose actual field names returned by the API
-  if (rows.length > 0) {
-    console.log("[ComexStat] sample rows (first 3):", JSON.stringify(rows.slice(0, 3), null, 2));
-  }
 
   for (const r of rows) {
     const y    = Number(r.year);
@@ -249,13 +227,6 @@ export async function buscarDadosComexstat(ncm: string): Promise<DadosComexstat>
   const prv = sumV(annualPrevC);
   const pc  = sumV(periodCurrC);
   const pp  = sumV(periodPrevC);
-
-  console.log("[ComexStat] sums:", {
-    lastYear, lastMonth, annualRef, annualPrev, showAccumulated,
-    annualRef_kg: ref.kg, annualPrev_kg: prv.kg,
-    periodCurr_kg: pc.kg, periodPrev_kg: pp.kg,
-    rows_total: rows.length,
-  });
 
   // ── Origens ──────────────────────────────────────────────────────────────────
   const rankC = (agg: Record<string, V>, topN = 12): OrigemEntry[] => {
