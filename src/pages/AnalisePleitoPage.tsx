@@ -20,7 +20,7 @@ import {
 import { makeAtribuicaoId } from "../services/atribuicoesService";
 import { norm, normKey, only8, formatNcm8 } from "../utils/stringUtils";
 import { analisarComercioComGemini, gerarAnaliseTecnica, gerarAnaliseComercioComexstat } from "../services/geminiComercioService";
-import { buscarDadosComexstat } from "../services/comexstatService";
+import { buscarDadosComexstat, type DadosComexstat } from "../services/comexstatService";
 import { getFichaArrayBuffer, getFichaUrl } from "../services/fichasStorageService";
 
 /* ----------------------------- Tipos ----------------------------- */
@@ -233,6 +233,7 @@ const AnalisePleitoPage: React.FC = () => {
   const [tecnicaLoading, setTecnicaLoading] = useState(false);
   const [comexstatLoading, setComexstatLoading] = useState(false);
   const [fichaDisponivel, setFichaDisponivel] = useState(false);
+  const [dadosComexstat, setDadosComexstat] = useState<DadosComexstat | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const ncmAtual = ncmQS || atr?.ncm || "";
@@ -289,8 +290,9 @@ const AnalisePleitoPage: React.FC = () => {
     try {
       toast.loading("Buscando dados na ComexStat…", { id: "comexstat" });
       const dados = await buscarDadosComexstat(ncmAtual);
+      setDadosComexstat(dados);
       toast.loading("Gerando análise com IA…", { id: "comexstat" });
-      const resultado = await gerarAnaliseComercioComexstat(dados, ncmAtual);
+      const resultado = await gerarAnaliseComercioComexstat(dados);
       setForm((f) => ({ ...f, comercio: resultado }));
       toast.success("Análise gerada com dados da ComexStat!", { id: "comexstat" });
     } catch (err: any) {
@@ -301,9 +303,10 @@ const AnalisePleitoPage: React.FC = () => {
   }, [ncmAtual]);
 
   const handleGerarTecnica = useCallback(async () => {
+    if (!dadosComexstat) { toast.error("Gere os dados via ComexStat primeiro."); return; }
     setTecnicaLoading(true);
     try {
-      const resultado = await gerarAnaliseTecnica(form.resumo || "", form.comercio || "", ncmAtual);
+      const resultado = await gerarAnaliseTecnica(dadosComexstat);
       setForm((f) => ({ ...f, tecnica: resultado }));
       toast.success("Análise técnica gerada com sucesso!");
     } catch (err: any) {
@@ -311,7 +314,7 @@ const AnalisePleitoPage: React.FC = () => {
     } finally {
       setTecnicaLoading(false);
     }
-  }, [form.resumo, form.comercio, ncmAtual]);
+  }, [dadosComexstat]);
 
   const [prevIdMigrated, setPrevIdMigrated] = useState<string | null>(null);
   const [isRetificadora, setIsRetificadora] = useState<boolean>(false);
@@ -1056,9 +1059,9 @@ const AnalisePleitoPage: React.FC = () => {
             />
             <button
               type="button"
-              disabled={tecnicaLoading || (!form.resumo?.trim() && !form.comercio?.trim())}
+              disabled={tecnicaLoading || !dadosComexstat}
               onClick={handleGerarTecnica}
-              title={!form.resumo?.trim() && !form.comercio?.trim() ? "Preencha o Resumo ou a Análise de comércio primeiro" : ""}
+              title={!dadosComexstat ? "Gere os dados via ComexStat primeiro" : "Gera análise de comércio exterior a partir dos dados da ComexStat"}
               className="mt-1.5 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-medium hover:bg-violet-700 disabled:opacity-60 transition-colors"
             >
               {tecnicaLoading

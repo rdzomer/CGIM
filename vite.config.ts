@@ -6,6 +6,16 @@ export default defineConfig({
   define: {
     "process.env": {}, // evita "process is not defined" por libs
   },
+  server: {
+    proxy: {
+      // Proxy para a API ComexStat — evita CORS em desenvolvimento local
+      "/comexstat-api": {
+        target: "https://api-comexstat.mdic.gov.br",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/comexstat-api/, ""),
+      },
+    },
+  },
   build: {
     rollupOptions: {
       output: {
