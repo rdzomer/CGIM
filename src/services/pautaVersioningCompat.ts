@@ -64,7 +64,10 @@ function keyFromRow(row: Row) {
   }
 }
 
-function shallowComparableRow(row: Row): Row {
+// Retorna cópia do row sem campos voláteis (statusVigencia, id, hash).
+// A comparação é feita via JSON.stringify, que serializa objetos aninhados
+// corretamente — o nome "comparable" reflete isso, não uma cópia superficial.
+function comparableRow(row: Row): Row {
   const copy: Row = {};
   for (const [k, v] of Object.entries(row || {})) {
     if (k === "statusVigencia") continue;
@@ -120,8 +123,8 @@ export async function diffPautas(baseId: string, novaId: string, opt: Options = 
       removidos.push(rBase);
     } else {
       // compara conteúdo
-      const a = JSON.stringify(shallowComparableRow(rBase));
-      const b = JSON.stringify(shallowComparableRow(rNova));
+      const a = JSON.stringify(comparableRow(rBase));
+      const b = JSON.stringify(comparableRow(rNova));
       if (a !== b) {
         alterados.push({ key: k, base: rBase, nova: rNova });
       } else {
@@ -154,8 +157,8 @@ export async function diffPautas(baseId: string, novaId: string, opt: Options = 
       if (!k) return r;
       if (baseMap.has(k)) {
         const rBase = baseMap.get(k)!;
-        const a = JSON.stringify(shallowComparableRow(rBase));
-        const b = JSON.stringify(shallowComparableRow(r));
+        const a = JSON.stringify(comparableRow(rBase));
+        const b = JSON.stringify(comparableRow(r));
         return { ...r, statusVigencia: a !== b ? "alterado" : "ativo" };
       } else {
         return { ...r, statusVigencia: "novo" };
