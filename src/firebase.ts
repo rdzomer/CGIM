@@ -64,7 +64,9 @@ if (import.meta.env.DEV) {
 const app = getApps().length ? getApps()[0] : initializeApp(cfg as any);
 
 export const db = initializeFirestore(app, {
-  experimentalForceLongPolling: true,
+  // Long polling só em dev (contorna limitação do proxy do Vite com WebSockets).
+  // Em produção usa WebSockets nativos, que são mais rápidos.
+  ...(import.meta.env.DEV ? { experimentalForceLongPolling: true } : {}),
 });
 
 export const auth = getAuth(app);
