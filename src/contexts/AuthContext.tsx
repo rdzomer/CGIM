@@ -9,6 +9,7 @@ import React, {
 import { auth, db } from "../firebase";
 import {
   onAuthStateChanged,
+  signInWithCustomToken,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as fbSignOut,
@@ -79,6 +80,21 @@ async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<Usuario | null>(null);
   const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const ALLOWED = ['http://localhost:3000', 'https://portalcgim.netlify.app'];
+    const handler = async (event: MessageEvent) => {
+      if (!ALLOWED.includes(event.origin)) return;
+      if (event.data?.type !== 'PORTAL_AUTH' || !event.data.customToken) return;
+      try {
+        await signInWithCustomToken(auth, event.data.customToken);
+      } catch (e) {
+        console.warn('[SSO] signInWithCustomToken failed:', e);
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, []);
 
   // Somente o onAuthStateChanged decide quando loading=false
   useEffect(() => {
