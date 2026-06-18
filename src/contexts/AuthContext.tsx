@@ -19,6 +19,22 @@ import {
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import type { Role, Usuario } from "../types";
 
+// helper simples no topo do arquivo (ou acima do useEffect)
+function withTimeout<T>(promise: Promise<T>, ms: number, label = "timeout"): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => reject(new Error(label)), ms);
+    promise
+      .then((v) => {
+        clearTimeout(id);
+        resolve(v);
+      })
+      .catch((e) => {
+        clearTimeout(id);
+        reject(e);
+      });
+  });
+}
+
 type AuthContextType = {
   user: Usuario | null;
   loading: boolean;
@@ -46,7 +62,7 @@ function clean(obj: Record<string, any>) {
 
 async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
   const ref = doc(db, "users", fbUser.uid);
-  const snap = await getDoc(ref);
+  const snap = await withTimeout(getDoc(ref), 2500, "firestore_boot_timeout");
 
   if (!snap.exists()) {
     // Inclua apenas campos definidos; use serverTimestamp para datas
@@ -54,7 +70,7 @@ async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
       uid: fbUser.uid,
       email: fbUser.email ?? null,        // null é aceito, undefined não
       nome: fbUser.displayName ?? undefined,
-      role: ("analista" as unknown) as Role,
+      role: "Analista" as Role,
       isActive: true,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -67,12 +83,11 @@ async function readOrCreateUserDoc(fbUser: FirebaseUser): Promise<Usuario> {
   }
 
   const data = snap.data() as any;
-  // Na leitura, tudo bem ter campos ausentes; complete com o que vier do auth
   return {
-    uid: fbUser.uid as any,
+    uid: fbUser.uid,
     email: fbUser.email ?? data?.email ?? null,
     nome: fbUser.displayName ?? data?.nome ?? null,
-    role: (data?.role as Role) ?? (("analista" as unknown) as Role),
+    role: (data?.role as Role) ?? ("Analista" as Role),
     ...data,
   } as Usuario;
 }
@@ -107,11 +122,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const u = await readOrCreateUserDoc(fb);
         setUser(u);
       } catch (e) {
-        console.error("[Auth] onAuthStateChanged error:", e);
-        setUser(null);
-      } finally {
-        setLoading(false);
-      }
+  console.error("[Auth] onAuthStateChanged error:", e);
+  if (fb) {
+    // fallback temporário: entra com dados básicos do Auth
+    setUser({
+      uid: fb.uid,
+      email: fb.email ?? "",
+      nome: fb.displayName ?? "Usuário",
+      role: "Analista" as Role,
+    } as Usuario);
+  } else {
+    setUser(null);
+  }
+} finally {
+  setLoading(false);
+}
     });
     return () => unsub();
   }, []);
@@ -166,3 +191,4 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 // Hook padrão
 export const useAuth = () => useContext(AuthContext);
 export default AuthProvider;
+

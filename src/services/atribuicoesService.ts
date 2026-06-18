@@ -11,6 +11,7 @@ import {
   where,
   getDocs,
 } from "firebase/firestore";
+import { norm, onlyDigits } from "../utils/stringUtils";
 
 /** ---------------------------------------------
  * Helpers de normalização / ID seguro
@@ -28,16 +29,11 @@ export function makeAtribuicaoId(pleitoKey: string): string {
   return id.length > 512 ? id.slice(0, 512) : id;
 }
 
-const onlyDigits = (s: string | undefined | null) =>
-  (s || "").replace(/\D+/g, "");
-const norm = (s: string | undefined | null) =>
-  (s || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-
 /** ---------------------------------------------
  * Chave do pleito (independente do nome exato das colunas)
  * Espera um objeto com chaves "NCM", "Produto" e "Pleiteante".
  * -------------------------------------------*/
-export function gerarPleitoKey(row: Record<string, string>): string {
+export function gerarPleitoKey(row: Record<string, string | undefined>): string {
   const ncm = onlyDigits(row["NCM"]);
   const produto = norm(row["Produto"]);
   const pleiteante = norm(row["Pleiteante"]);

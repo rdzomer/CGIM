@@ -7,16 +7,9 @@ import {
   getDocs,
 } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, User as FBUser } from "firebase/auth";
-import {
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  Tooltip as ReTooltip,
-  Legend as ReLegend,
-} from "recharts";
 import { getNcmSetCgim } from "../services/ncmsService";
 import { gerarPleitoKey, carregarAtribuicoesPorChaves } from "../services/atribuicoesService";
+import { norm, normKey, only8, toMillis, normalizeStatus } from "../utils/stringUtils";
 
 /* ==================== Tipos ==================== */
 type MiniUser = { uid?: string; email?: string; nome?: string } | null;
@@ -49,25 +42,6 @@ type Atrib = {
 };
 
 /* ==================== Helpers ==================== */
-const norm = (s?: string) => (s || "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s?: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-const onlyDigits = (s?: string) => (s || "").replace(/\D+/g, "");
-
-const toMillis = (t: any): number => {
-  if (!t) return 0;
-  if (typeof t === "number") return t;
-  if (t instanceof Date) return t.getTime();
-  if (typeof t?.toMillis === "function") return t.toMillis();
-  if (t?.seconds) return t.seconds * 1000 + (t.nanoseconds || 0) / 1e6;
-  return 0;
-};
-
-const normalizeStatus = (s?: string) => {
-  const v = (s || "").toLowerCase();
-  if (/conclu[ií]d/.test(v)) return "concluido";
-  if (/em[\s_ ]?an[aá]lis/.test(v)) return "em_analise";
-  return "nao_iniciado";
-};
 const displayStatus = (raw?: string) => {
   const n = normalizeStatus(raw);
   if (n === "concluido") return "Concluído";
@@ -105,7 +79,7 @@ function projectLinha(row: PleitoRow) {
 /** Constrói pleitoKey quando a linha não traz `key` explícita */
 function tryMakeKeyFromRow(row: PleitoRow): string {
   const { ncm, produto, pleiteante } = projectLinha(row);
-  const n8 = onlyDigits(ncm).slice(0, 8);
+  const n8 = only8(ncm);
   try {
     const k = gerarPleitoKey({ NCM: n8, Produto: produto || "", Pleiteante: pleiteante || "" });
     if (k) return String(k);
@@ -243,7 +217,7 @@ const DashboardPage: React.FC = () => {
         const flat = flattenPleitosFromPauta(pauta);
         flat.forEach((r: any) => {
           const { ncm, produto, pleiteante, tipo } = projectLinha(r);
-          const n8 = onlyDigits(ncm).slice(0, 8);
+          const n8 = only8(ncm);
           if (hasNcm && n8.length !== 8) return;
           if (hasNcm && !ncmSet.has(n8)) return;
 
@@ -335,15 +309,6 @@ const DashboardPage: React.FC = () => {
     return acc;
   }, [itens]);
 
-  const pieData = useMemo(
-    () => [
-      { name: "Novo", value: resumo.nao_iniciado },
-      { name: "Em Análise", value: resumo.em_analise },
-      { name: "Concluído", value: resumo.concluido },
-    ],
-    [resumo]
-  );
-  const PIE_COLORS = ["#9ca3af", "#60a5fa", "#34d399"];
 
   /* ==================== Navegação (somente leitura) ==================== */
   const openViewAnalyse = (atr: Atrib) => {

@@ -51,16 +51,13 @@ export type PautaFirestore = {
 // ===================== Helpers =====================
 /** Hash SHA-256 do arquivo (hex). */
 export async function hashDoArquivo(buf: ArrayBuffer): Promise<string> {
-  // Browser moderno
-  if (typeof crypto !== "undefined" && crypto?.subtle) {
-    const h = await crypto.subtle.digest("SHA-256", buf);
-    return Array.from(new Uint8Array(h))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+  if (typeof crypto === "undefined" || !crypto.subtle) {
+    throw new Error("Web Crypto API não suportada neste ambiente.");
   }
-  // Fallback (Node)
-  const { createHash } = await import("crypto");
-  return createHash("sha256").update(Buffer.from(buf)).digest("hex");
+  const h = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(h))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 /** Busca doc de pauta por ID direto; caso não exista, tenta pelo campo 'hash'. */

@@ -12,14 +12,9 @@ import {
 } from "firebase/firestore";
 import { Download, Printer } from "lucide-react";
 import { exportRelatorioDocx, CabecalhoRelatorio } from "../services/relatorioExport";
+import { norm, normKey, only8 } from "../utils/stringUtils";
 
 /** ===================== Utils ===================== */
-const norm = (s?: any) =>
-  String(s ?? "")
-    .replace(/\u00A0/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
 /** Normaliza mantendo quebras de linha */
 const normKeepBreaks = (s?: any) => {
   let t = String(s ?? "");
@@ -32,19 +27,11 @@ const normKeepBreaks = (s?: any) => {
   return t;
 };
 
-const normKey = (s?: any) =>
-  norm(s)
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
-
 const softKey = (s?: any) =>
   normKey(s)
     .replace(/[^\w|]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-
-const only8 = (s?: any) => norm(s).replace(/\D+/g, "").slice(0, 8);
 
 const fmtNcm = (s?: any) => {
   const n = only8(s);
