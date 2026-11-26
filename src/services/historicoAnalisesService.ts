@@ -1,5 +1,9 @@
 // src/services/historicoAnalisesService.ts
 import { getFirestore, doc, getDoc, setDoc, collection, addDoc, serverTimestamp } from "firebase/firestore";
+import { makeAtribuicaoId } from "./atribuicoesService";
+
+/** ID do doc em analisesHistoricas: Base64URL da pleitoKey (a chave pode conter "/"). */
+const historicoDocId = (pleitoKey: string) => makeAtribuicaoId(pleitoKey);
 
 export type HistoricoAnaliseDoc = {
   pleitoKey: string;
@@ -63,7 +67,7 @@ export async function upsertHistoricoFromAtribuicao(db = getFirestore(), atrib: 
   const snap = toHistoricoFromAtrib(atrib);
   if (!snap) return;
 
-  const ref = doc(db, "analisesHistoricas", snap.pleitoKey);
+  const ref = doc(db, "analisesHistoricas", historicoDocId(snap.pleitoKey));
   const cur = await getDoc(ref);
 
   const curMillis = toMillis(cur.data()?.ultimaAtualizacao);
@@ -89,7 +93,13 @@ export async function upsertHistoricoFromAtribuicao(db = getFirestore(), atrib: 
 export async function getHistoricoByPleitoKey(db = getFirestore(), pleitoKey: string): Promise<HistoricoAnaliseDoc | null> {
   const k = norm(pleitoKey || "");
   if (!k) return null;
-  const ref = doc(db, "analisesHistoricas", k);
+  const ref = doc(db, "analisesHistoricas", historicoDocId(k));
   const snap = await getDoc(ref);
-  return snap.exists() ? ({ id: ref.id, ...(snap.data() as any) } as any) : null;
+  if (snap.exists()) return { id: ref.id, ...(snap.data() as any) } as any;
+  // compat: documentos antigos usavam a própria pleitoKey como ID
+  if (!k.includes("/")) {
+    const legacy = await getDoc(doc(db, "analisesHistoricas", k));
+    if (legacy.exists()) return { id: legacy.id, ...(legacy.data() as any) } as any;
+  }
+  return null;
 }

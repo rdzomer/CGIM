@@ -8,6 +8,7 @@ import {
   Page,
   NcmDoc,
 } from "../services/ncmsService";
+import RepararAtribuicoes from "../components/RepararAtribuicoes";
 
 type NcmLinha = Pick<NcmDoc, "ncm" | "setor" | "produto">;
 
@@ -146,6 +147,8 @@ const ConfiguracoesPage: React.FC = () => {
           Total atual no banco: <b>{totalFmt}</b> NCM(s)
         </div>
       </div>
+
+      <RepararAtribuicoes />
 
       {/* Filtros e paginação */}
       <div className="bg-white rounded border p-4 mb-3">

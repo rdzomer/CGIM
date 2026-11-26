@@ -16,7 +16,9 @@ import {
   Legend as ReLegend,
 } from "recharts";
 import { getNcmSetCgim } from "../services/ncmsService";
-import { gerarPleitoKey, carregarAtribuicoesPorChaves } from "../services/atribuicoesService";
+import { carregarAtribuicoesPorChaves } from "../services/atribuicoesService";
+import { ANALISTAS, resolverAnalista, responsavelDaAtribuicao } from "../services/analistas";
+import { pleitoKeyFromRow } from "../services/pleitoFields";
 
 /* ==================== Tipos ==================== */
 type MiniUser = { uid?: string; email?: string; nome?: string } | null;
@@ -102,25 +104,18 @@ function projectLinha(row: PleitoRow) {
   };
 }
 
-/** Constrói pleitoKey quando a linha não traz `key` explícita */
+/** Mesma regra de chave da Pauta CAT. */
 function tryMakeKeyFromRow(row: PleitoRow): string {
-  const { ncm, produto, pleiteante } = projectLinha(row);
-  const n8 = onlyDigits(ncm).slice(0, 8);
-  try {
-    const k = gerarPleitoKey({ NCM: n8, Produto: produto || "", Pleiteante: pleiteante || "" });
-    if (k) return String(k);
-  } catch {}
-  return `${n8}|${normKey(produto)}|${normKey(pleiteante)}`;
+  return pleitoKeyFromRow(row);
 }
 
-const ANALISTAS_FIXOS = ["Todos","Pedro Reckziegel","Ricardo Zomer","Antonio Azambuja"] as const;
+const ANALISTAS_FIXOS = ["Todos", ...ANALISTAS] as const;
 const STATUS_OPCOES = ["Todos", "Novo", "Em Análise", "Concluído"] as const;
 
 function nomeMatchesFiltro(nome: string | undefined | null, filtro: typeof ANALISTAS_FIXOS[number]) {
   if (filtro === "Todos") return true;
   if (!nome) return false;
-  const a = normKey(nome); const b = normKey(filtro);
-  return a === b || a.replace("antonio","antônio") === b || a.replace("antônio","antonio") === b;
+  return (resolverAnalista(nome) || normKey(nome)) === filtro || normKey(nome) === normKey(filtro);
 }
 
 function statusMatchesFiltro(statusRaw: string | undefined, filtro: typeof STATUS_OPCOES[number]) {
@@ -313,7 +308,7 @@ const DashboardPage: React.FC = () => {
 
       // Analista (filtro e exibição): **sempre** o da Pauta CAT quando existir
       const analistaCat = respPorChave[p.pleitoKey] || "";
-      const analista = analistaCat || (at?.responsavelNome || at?.analistaNome || (at as any)?.atribuido?.nome || "");
+      const analista = analistaCat || responsavelDaAtribuicao(at) || ((at as any)?.atribuido?.nome || "");
 
       const sugestao = at?.analise?.sugestao ? String(at.analise.sugestao) : "";
       const status = at?.status || "Não iniciado";
@@ -348,7 +343,10 @@ const DashboardPage: React.FC = () => {
   /* ==================== Navegação (somente leitura) ==================== */
   const openViewAnalyse = (atr: Atrib) => {
     // Abre a análise existente em modo somente leitura
-    nav(`/analise/${encodeURIComponent(atr.id)}?readonly=1`);
+    const qs = new URLSearchParams({ readonly: "1" });
+    if (atr.pleitoKey) qs.set("pleitoKey", atr.pleitoKey);
+    if (atr.pautaId) qs.set("pautaId", atr.pautaId);
+    nav(`/analise/${encodeURIComponent(atr.id)}?${qs.toString()}`);
   };
 
   /* ==================== Render (layout intacto) ==================== */

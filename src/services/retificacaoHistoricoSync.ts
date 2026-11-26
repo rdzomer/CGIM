@@ -9,6 +9,7 @@ import {
   where,
 } from "firebase/firestore";
 import { upsertHistoricoFromAtribuicao } from "./historicoAnalisesService";
+import { pleitoKeyFromRow } from "./pleitoFields";
 
 type AnyRow = Record<string, any>;
 type Atrib = {
@@ -24,8 +25,6 @@ type Atrib = {
 };
 
 const norm = (s?: string) => (s ?? "").toString().replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s?: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-const only8 = (s?: string) => (s ?? "").replace(/\D+/g, "").slice(0, 8);
 
 const toMillis = (t: any): number => {
   if (!t) return 0;
@@ -35,27 +34,9 @@ const toMillis = (t: any): number => {
   return 0;
 };
 
-function pickKey(row: AnyRow, candidates: string[]): string | undefined {
-  const keys = Object.keys(row || {});
-  for (const cand of candidates) {
-    const k = keys.find((kk) => normKey(kk) === normKey(cand));
-    if (k) return k;
-  }
-  for (const kk of keys) {
-    const nk = normKey(kk);
-    if (candidates.some((c) => nk.includes(normKey(c)))) return kk;
-  }
-  return undefined;
-}
-
+/** Mesma regra de chave usada na Pauta CAT (antes gerava a chave em minúsculas e nunca casava). */
 function tryMakeKeyFromRow(row: AnyRow): string {
-  const kNcm = pickKey(row, ["NCM", "Código NCM", "Codigo NCM", "Código", "Codigo", "NCM 8"]);
-  const kProd = pickKey(row, ["Produto","Descrição do Produto","Descricao do Produto","Produto/Descrição","Descrição","Descricao"]);
-  const kPlt  = pickKey(row, ["Pleiteante","Empresa","Requerente","Solicitante"]);
-  const n8 = only8(kNcm ? String(row[kNcm] ?? "") : "");
-  const produto = kProd ? String(row[kProd] ?? "") : "";
-  const pleiteante = kPlt ? String(row[kPlt] ?? "") : "";
-  return `${n8}|${normKey(produto)}|${normKey(pleiteante)}`;
+  return pleitoKeyFromRow(row);
 }
 
 function hasContent(a?: Atrib | null) {

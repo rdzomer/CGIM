@@ -8,8 +8,6 @@ import {
   query,
   where,
   documentId,
-  orderBy,
-  limit,
   Query,
   DocumentData,
 } from "firebase/firestore";
@@ -23,6 +21,7 @@ import {
   Legend as ReLegend,
 } from "recharts";
 import { makeAtribuicaoId, gerarPleitoKey } from "../services/atribuicoesService";
+import { flattenPautaRows, findRowForPleito, projectLinha as projectCampos, splitNotasTecnicas, pleitoKeyFromRow } from "../services/pleitoFields";
 
 /* ==================== Tipos ==================== */
 type MiniUser = { uid?: string; email?: string; nome?: string } | null;
@@ -37,6 +36,7 @@ type Atribuicao = {
   produto?: string;
   pleiteante?: string;
   tipoPleito?: string;
+  notaTecnica?: string;
 
   analistaUid?: string;
   analistaEmail?: string;
@@ -171,14 +171,9 @@ function projectLinha(row: AnyRow) {
   };
 }
 
+/** Mesma regra de chave da Pauta CAT. */
 function tryMakeKeyFromRow(row: AnyRow): string {
-  const { ncm, produto, pleiteante } = projectLinha(row);
-  const n8 = onlyDigits(ncm).slice(0, 8);
-  try {
-    const k = gerarPleitoKey({ NCM: n8, Produto: produto || "", Pleiteante: pleiteante || "" });
-    if (k) return String(k);
-  } catch {}
-  return `${n8}|${normKey(produto)}|${normKey(pleiteante)}`;
+  return pleitoKeyFromRow(row);
 }
 
 /* ==================== Pauta helpers + cache ==================== */
@@ -576,7 +571,7 @@ const MinhasTarefasPage: React.FC = () => {
 
   const [loading, setLoading] = useState(true);
   const [tarefas, setTarefas] = useState<Atribuicao[]>([]);
-  const [copyLoading, setCopyLoading] = useState<Record<string, boolean>>({});
+  const [copyLoading] = useState<Record<string, boolean>>({});
   const [priorMap, setPriorMap] = useState<Record<string, string | null>>({});
 
   const [pautas, setPautas] = useState<PautaDoc[]>([]);
@@ -672,43 +667,24 @@ const MinhasTarefasPage: React.FC = () => {
         const merged = Array.from(byScopedKey.values());
 
         let pauta: PautaDoc | undefined;
-        const need = merged.filter((l) => !(l.ncm && l.produto && l.tipoPleito && l.tituloSecao));
 
         const pautasMap = await getPautasByIdsCached(db, [pautaId]);
         pauta = pautasMap[pautaId];
         if (pauta) {
           const rows = flattenPleitosFromPauta(pauta);
+          const linhas = flattenPautaRows(pauta);
 
-          for (const t of need) {
-            let found: AnyRow | undefined = rows.find((r) => {
-              const k = String((r as any)?.key || (r as any)?.id || "");
-              return t.pleitoKey && k && normKey(k) === normKey(t.pleitoKey);
-            });
-
-            if (!found && t.pleitoKey) {
-              found = rows.find((r) => {
-                const k = tryMakeKeyFromRow(r);
-                return k && normKey(k) === normKey(t.pleitoKey!);
-              });
-            }
-
-            if (!found) {
-              const n8 = onlyDigits(t.ncm).slice(0, 8);
-              const prodNk = normKey(t.produto || "");
-              found = rows.find((r) => {
-                const pr = projectLinha(r);
-                return onlyDigits(pr.ncm).slice(0, 8) === n8 && normKey(pr.produto) === prodNk;
-              });
-            }
-
-            if (found) {
-              const pr = projectLinha(found);
-              t.ncm = t.ncm || pr.ncm;
-              t.produto = t.produto || pr.produto;
-              t.pleiteante = t.pleiteante || pr.pleiteante;
-              t.tipoPleito = t.tipoPleito || pr.tipoPleito;
-              t.tituloSecao = t.tituloSecao || String((found as any)?.__sec || "");
-            }
+          // Completa os dados de cada tarefa com a linha da pauta (inclui Nota Técnica)
+          for (const t of merged) {
+            const achado = findRowForPleito(linhas, { pleitoKey: t.pleitoKey, ncm: t.ncm, produto: t.produto });
+            if (!achado) continue;
+            const pr = projectCampos(achado.row);
+            t.ncm = t.ncm || pr.ncm;
+            t.produto = t.produto || pr.produto;
+            t.pleiteante = t.pleiteante || pr.pleiteante;
+            t.tipoPleito = t.tipoPleito || pr.tipoPleito;
+            if (achado.secao) t.tituloSecao = achado.secao;
+            if (pr.notaTecnica) t.notaTecnica = pr.notaTecnica;
           }
 
           const assignedKeys = new Set(merged.map((a) => String(a.pleitoKey || "")).filter(Boolean));
@@ -729,6 +705,7 @@ const MinhasTarefasPage: React.FC = () => {
               produto: pr.produto,
               pleiteante: pr.pleiteante,
               tipoPleito: pr.tipoPleito,
+              notaTecnica: projectCampos(r).notaTecnica,
               tituloSecao: String((r as any)?.__sec || ""),
               status: "Não iniciado",
               analise: null,
@@ -988,6 +965,16 @@ const MinhasTarefasPage: React.FC = () => {
                         <div className="space-y-1 col-span-2">
                           <div className="text-xs text-gray-500">Pleiteante</div>
                           <div className="font-medium truncate">{renderStr(t.pleiteante)}</div>
+                        </div>
+                        <div className="space-y-1 col-span-2">
+                          <div className="text-xs text-gray-500">Nota Técnica (SE/CAMEX)</div>
+                          {splitNotasTecnicas(t.notaTecnica).length ? (
+                            splitNotasTecnicas(t.notaTecnica).map((nt, i) => (
+                              <div key={i} className="font-medium text-indigo-800">{nt}</div>
+                            ))
+                          ) : (
+                            <div className="text-gray-400">—</div>
+                          )}
                         </div>
                       </div>
 
