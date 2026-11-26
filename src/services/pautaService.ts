@@ -9,7 +9,6 @@ import {
   getFirestore,
   collection,
   doc,
-  setDoc,
   addDoc,
   updateDoc,
   getDoc,
@@ -96,7 +95,7 @@ async function calcularRevIndex(baseId: string, ignoreId?: string): Promise<numb
 
 /**
  * Cria (se não existir) e retorna o ID da pauta.
- * - Se já houver pauta com o MESMO `hash`, retorna o ID existente (dedupe).
+ * - Se já houver pauta com o MESMO `hash`, retorna o ID existente com existed=true (dedupe).
  * - O doc é criado com ID automático (não usa mais o hash como id).
  */
 export async function salvarPautaNoFirestoreAuto(
@@ -105,14 +104,14 @@ export async function salvarPautaNoFirestoreAuto(
   secoes: Secao[],
   stats: Stats,
   meeting?: string | null
-): Promise<string | null> {
+): Promise<{ id: string; existed: boolean } | null> {
   const db = getFirestore();
   // Dedupe por hash
   const q = query(collection(db, "pautas"), where("hash", "==", hash), limit(1));
   const snap = await getDocs(q);
   if (!snap.empty) {
-    // já existe: devolve o ID existente (compat com fluxo antigo)
-    return snap.docs[0].id;
+    // já existe: devolve o ID existente e sinaliza a duplicidade
+    return { id: snap.docs[0].id, existed: true };
   }
 
   const payload: PautaFirestore = {
@@ -126,7 +125,7 @@ export async function salvarPautaNoFirestoreAuto(
   };
 
   const ref = await addDoc(collection(db, "pautas"), payload);
-  return ref.id;
+  return { id: ref.id, existed: false };
 }
 
 /**

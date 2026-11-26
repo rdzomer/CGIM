@@ -11,6 +11,7 @@ import {
   where,
   getDocs,
 } from "firebase/firestore";
+import { responsavelDaAtribuicao } from "./analistas";
 
 /** ---------------------------------------------
  * Helpers de normalização / ID seguro
@@ -45,8 +46,11 @@ export function gerarPleitoKey(row: Record<string, string>): string {
 }
 
 /** ---------------------------------------------
- * Upsert da atribuição
- * Quando responsavelNome = "—" (ou vazio), limpa a atribuição.
+ * Upsert da atribuição feito pela Pauta CAT.
+ * - responsavelNome null/""/"—" remove o responsável (grava null).
+ * - NÃO altera status nem análise de um pleito já existente: trocar o
+ *   analista ou reatribuir o pleito numa pauta nova preserva o andamento.
+ * - createdAt só é gravado na criação do documento.
  * -------------------------------------------*/
 type UpsertPayload = {
   pleitoKey: string;
@@ -56,9 +60,11 @@ type UpsertPayload = {
   ncm?: string;
   produto?: string;
   pleiteante?: string;
+  tipoPleito?: string;
+  notaTecnica?: string;
   pautaId?: string;
   tituloSecao?: string;
-  status?: string; // default: "novo"
+  status?: string; // só usado quando informado explicitamente
 };
 export async function salvarAtribuicaoPleito(payload: UpsertPayload) {
   const db = getFirestore();
@@ -67,51 +73,36 @@ export async function salvarAtribuicaoPleito(payload: UpsertPayload) {
 
   const id = makeAtribuicaoId(pleitoKey);
   const ref = doc(db, "atribuicoes", id);
+  const atual = await getDoc(ref);
 
   const limpar =
     !payload.responsavelNome ||
     payload.responsavelNome === "—" ||
     !String(payload.responsavelNome).trim();
 
-  const base = {
+  const data: Record<string, any> = {
     pleitoKey,
     ncm: payload.ncm ?? null,
     produto: payload.produto ?? null,
     pleiteante: payload.pleiteante ?? null,
     pautaId: payload.pautaId ?? null,
     tituloSecao: payload.tituloSecao ?? null,
+    responsavelNome: limpar ? null : payload.responsavelNome,
+    responsavelUid: limpar ? null : payload.responsavelUid ?? null,
+    responsavelEmail: limpar ? null : payload.responsavelEmail ?? null,
     updatedAt: serverTimestamp(),
   };
+  if (payload.tipoPleito) data.tipoPleito = payload.tipoPleito;
+  if (payload.notaTecnica) data.notaTecnica = payload.notaTecnica;
 
-  if (limpar) {
-    // Mantemos o doc, mas sem responsável
-    await setDoc(
-      ref,
-      {
-        ...base,
-        responsavelNome: null,
-        responsavelUid: null,
-        responsavelEmail: null,
-        status: payload.status ?? "novo",
-        createdAt: serverTimestamp(), // inofensivo em merge
-      },
-      { merge: true }
-    );
-    return;
+  if (!atual.exists()) {
+    data.status = payload.status ?? "novo";
+    data.createdAt = serverTimestamp();
+  } else if (payload.status) {
+    data.status = payload.status;
   }
 
-  await setDoc(
-    ref,
-    {
-      ...base,
-      responsavelNome: payload.responsavelNome ?? null,
-      responsavelUid: payload.responsavelUid ?? null,
-      responsavelEmail: payload.responsavelEmail ?? null,
-      status: payload.status ?? "novo",
-      createdAt: serverTimestamp(),
-    },
-    { merge: true }
-  );
+  await setDoc(ref, data, { merge: true });
 }
 
 /** ---------------------------------------------
@@ -121,16 +112,14 @@ export async function carregarAtribuicoesPorChaves(keys: string[]) {
   const db = getFirestore();
   const out: Record<string, string> = {};
 
-  // Firestore não tem "IN" com >10, então fazemos em loop
   await Promise.all(
-    keys.map(async (key) => {
+    Array.from(new Set(keys)).map(async (key) => {
       try {
         const id = makeAtribuicaoId(key);
         const snap = await getDoc(doc(db, "atribuicoes", id));
         if (snap.exists()) {
-          const v = snap.data() as any;
-          const nome = v?.responsavelNome || "";
-          if (nome) out[key] = String(nome);
+          const nome = responsavelDaAtribuicao(snap.data());
+          if (nome) out[key] = nome;
         }
       } catch {
         /* ignore */

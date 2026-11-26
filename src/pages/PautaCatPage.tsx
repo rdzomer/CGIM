@@ -1,11 +1,10 @@
 // src/pages/PautaCatPage.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import {
   salvarPautaNoFirestoreAuto,
-  regravarPautaPorHash,
   hashDoArquivo,
   listarPautas,
   carregarPautaCompleta,
@@ -14,9 +13,11 @@ import {
 import { getNcmSetCgim } from "../services/ncmsService";
 import {
   carregarAtribuicoesPorChaves,
-  gerarPleitoKey,
   salvarAtribuicaoPleito,
 } from "../services/atribuicoesService";
+import { ANALISTAS } from "../services/analistas";
+import { parsePautaHtml, decodeHtmlBest } from "../services/pautaParser";
+import { norm, normKey, projectLinha, pleitoKeyFromRow } from "../services/pleitoFields";
 
 // Firestore (para atualizar metadados e, se preciso, localizar pauta pelo hash)
 import {
@@ -25,70 +26,10 @@ import {
   updateDoc,
   serverTimestamp,
   Timestamp,
-  collection,
-  getDocs,
-  query as fsQuery,
-  where,
-  limit as fsLimit,
 } from "firebase/firestore";
 
 // >>> serviço de versionamento/diff entre pautas
 import { diffPautas } from "../services/pautaVersioningCompat";
-
-// ---------------- ANALISTAS PADRÃO ----------------
-const ANALISTAS = ["Ricardo Zomer", "Pedro Reckziegel", "Antônio Azambuja", "Tólio Ribeiro"] as const;
-
-// ---------------- helpers ----------------
-const norm = (s: string) => (s || "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-const normKey = (s: string) => norm(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-function onlyDigits(s: string | undefined | null): string { if (!s) return ""; return String(s).replace(/\D+/g, ""); }
-
-function isHeaderLikely(h: string) {
-  const k = normKey(h);
-  return (
-    k.includes("ncm") ||
-    k.includes("produto") ||
-    k.includes("pleiteante") ||
-    k.includes("quota") ||
-    k.includes("redu") || // redução
-    k === "ex" ||
-    k.includes("pais") ||
-    k.includes("situa") ||
-    k.includes("tipo de pleito") ||
-    k.includes("aliquota") ||
-    k.includes("processo") ||
-    k.includes("prazo")
-  );
-}
-
-function dedupeHeaders(headers: string[]) {
-  const seen = new Map<string, number>();
-  return headers.map((h) => {
-    const base = norm(h);
-    const k = normKey(base);
-    const count = (seen.get(k) || 0) + 1;
-    seen.set(k, count);
-    return count === 1 ? base : `${base} ${count}`;
-  });
-}
-
-function decodeHtmlBest(buf: ArrayBuffer): string {
-  const utf = new TextDecoder("utf-8", { fatal: false }).decode(buf);
-  const iso = new TextDecoder("iso-8859-1").decode(buf);
-  const score = (s: string) => {
-    const bad = (s.match(/Ã.|Â.|�/g) || []).length;
-    const good = (s.match(/[áéíóúãõâêôçÁÉÍÓÚÃÕÂÊÔÇ]/g) || []).length;
-    return bad * 10 - good;
-  };
-  const sUtf = score(utf);
-  const sIso = score(iso);
-  if (sUtf === sIso) {
-    const gUtf = (utf.match(/[áéíóúãõâêôçÁÉÍÓÚÃÕÂÊÔÇ]/g) || []).length;
-    const gIso = (iso.match(/[áéíóúãõâêôçÁÉÍÓÚÃÕÂÊÔÇ]/g) || []).length;
-    return gUtf >= gIso ? utf : iso;
-  }
-  return sUtf < sIso ? utf : iso;
-}
 
 // ===== extrairMeeting (captura a frase completa) =====
 function extrairMeeting(html: string): string | null {
@@ -165,76 +106,6 @@ function makeSlugFromTitle(title?: string, dt?: Date | null): string {
   return "";
 }
 
-function findSectionTitle(fromEl: Element): string | null {
-  let el: Element | null = fromEl.previousElementSibling;
-  const candidates: string[] = [];
-  for (let i = 0; i < 50 && el; i++, el = el.previousElementSibling) {
-    const tag = el.tagName;
-    const txtEl = (/(H1|H2|H3|H4)/.test(tag) ? el : el.querySelector("b, strong")) as Element | null;
-    const txt = (txtEl && (txtEl.textContent || "").trim()) || "";
-    if (txt) candidates.push(txt.replace(/\s+/g, " ").trim());
-  }
-  if (candidates.length === 0) return null;
-  const numbered = candidates.find((t) => /^\d+(?:\.\d+){0,3}\s+/.test(t));
-  if (numbered) return numbered;
-  const kw = candidates.find((t) => /(Pleitos|CCM|CAT|LETEC|Mercosul)/i.test(t));
-  if (kw) return kw;
-  return candidates[0];
-}
-
-function parsePautaHtml(html: string) {
-  const dom = new DOMParser().parseFromString(html, "text/html");
-  const allTables = Array.from(dom.querySelectorAll("table"));
-
-  const secoesBrutas: { titulo: string; headers: string[]; rows: Record<string, string>[] }[] = [];
-  let totalItens = 0;
-
-  for (const tb of allTables) {
-    const firstRow = tb.querySelector("tr");
-    if (!firstRow) continue;
-
-    let rawHeaders = Array.from(firstRow.querySelectorAll("th")).map((th) => norm(th.textContent || ""));
-    if (rawHeaders.length === 0) rawHeaders = Array.from(firstRow.querySelectorAll("td")).map((td) => norm(td.textContent || ""));
-    if (rawHeaders.length === 0) continue;
-
-    const hits = rawHeaders.filter(isHeaderLikely).length;
-    if (hits < 2) continue;
-
-    const headers = dedupeHeaders(rawHeaders);
-    const rows: Record<string, string>[] = [];
-
-    const dataRows = Array.from(tb.querySelectorAll("tr")).slice(1);
-    for (const tr of dataRows) {
-      const tds = Array.from(tr.querySelectorAll("td"));
-      if (tds.length === 0) continue;
-      const rec: Record<string, string> = {};
-      tds.forEach((td, i) => {
-        const key = headers[i] || `Col_${i + 1}`;
-        rec[key] = norm(td.textContent || "");
-      });
-      if (Object.values(rec).some((v) => v.length > 0)) rows.push(rec);
-    }
-    if (rows.length === 0) continue;
-
-    const titulo = findSectionTitle(tb) || "Seção";
-    secoesBrutas.push({ titulo, headers, rows });
-    totalItens += rows.length;
-  }
-
-  const byTitle = new Map<string, { headers: string[]; rows: Record<string, string>[] }>();
-  for (const s of secoesBrutas) {
-    if (!byTitle.has(s.titulo)) byTitle.set(s.titulo, { headers: s.headers, rows: [] });
-    byTitle.get(s.titulo)!.rows.push(...s.rows);
-  }
-
-  const numKey = (t: string) => t.match(/^(\d+(?:\.\d+){0,3})/)?.[1] ?? "";
-  const secoes = Array.from(byTitle.entries())
-    .map(([titulo, v]) => ({ titulo, headers: v.headers, rows: v.rows, qtd: v.rows.length }))
-    .sort((a, b) => (numKey(a.titulo) > numKey(b.titulo) ? 1 : -1));
-
-  return { secoes, stats: { secoes: secoes.length, tabelas: secoesBrutas.length, itens: totalItens } };
-}
-
 // ---------------- tipos locais p/ render ----------------
 type Secao = { titulo: string; headers: string[]; rows: Record<string, string>[]; qtd: number; };
 type Stats = { secoes: number; tabelas: number; itens: number };
@@ -278,14 +149,35 @@ async function upsertPautaMetadata(pautaId: string, fileName: string, meeting: s
 }
 
 // ---------------- componente ----------------
+type DupInfo = { fileName: string; buf: ArrayBuffer; fileHash?: string; existingId: string };
+
+/** Pauta salva -> seções para exibição (aceita formatos antigos). */
+function secoesDaPautaSalva(full: any): Secao[] {
+  const arr: any[] = Array.isArray(full?.secoes) ? full.secoes : Array.isArray(full?.sections) ? full.sections : [];
+  return arr.map((s: any) => {
+    const rows = Array.isArray(s?.rows) ? s.rows : [];
+    return {
+      titulo: String(s?.titulo ?? s?.title ?? ""),
+      headers: Array.isArray(s?.headers) ? s.headers : [],
+      rows,
+      qtd: rows.length,
+    } as Secao;
+  });
+}
+
 const PautaCatPage: React.FC = () => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const idDaUrl = searchParams.get("id") || "";
+  const secaoDaUrl = searchParams.get("secao") || "";
+
   const [secoes, setSecoes] = useState<Secao[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [dupInfo, setDupInfo] = useState<null | { fileName: string; buf: ArrayBuffer; fileHash?: string }>(null);
+  const [dupInfo, setDupInfo] = useState<null | DupInfo>(null);
   const [firestoreBadge, setFirestoreBadge] = useState<"novo" | "dup" | null>(null);
   const [historico, setHistorico] = useState<HistoricoItem[]>([]);
   const [currentPautaId, setCurrentPautaId] = useState<string | null>(null);
+  const [currentMeeting, setCurrentMeeting] = useState<string | null>(null);
 
   // >>> DIF entre pautas
   const [pautaBaseId, setPautaBaseId] = useState<string>("");
@@ -308,43 +200,56 @@ const PautaCatPage: React.FC = () => {
     listarPautas(5).then((arr: any[]) => setHistorico(arr as HistoricoItem[])).catch(() => {});
   }, []);
 
-  // reabrir última pauta ao voltar
-  useEffect(() => {
-    const s = sessionStorage.getItem("pauta.lastOpen");
-    if (s) {
-      try {
-        const data = JSON.parse(s);
-        sessionStorage.removeItem("pauta.lastOpen");
-        if (data?.id) {
-          carregarPautaCompleta(data.id).then((res) => {
-            setSecoes((res.secoes || []) as Secao[]);
-            setStats(res.stats || null);
-            setCurrentPautaId(data.id);
-            setFirestoreBadge(null);
-          });
-        }
-      } catch {}
+  const abrirPautaSalva = async (id: string, aviso?: string) => {
+    try {
+      const full = await carregarPautaCompleta(id);
+      setSecoes(secoesDaPautaSalva(full));
+      setStats(full.stats || null);
+      setCurrentPautaId(id);
+      setCurrentMeeting(full.meeting || full.title || null);
+      setFirestoreBadge(null);
+      setDupInfo(null);
+      if (aviso) toast.success(aviso);
+    } catch {
+      toast.error("Falha ao abrir a pauta.");
     }
-  }, []);
+  };
 
-  // abrir automaticamente a pauta mais recente
+  // Abre a pauta indicada na URL (?id=...) ou, sem ela, a mais recente
   useEffect(() => {
-    if (currentPautaId) return;
-    if (!historico.length) return;
-    (async () => {
-      try {
-        const latest = historico[0];
-        const full = await carregarPautaCompleta(latest.id);
-        setSecoes((full.secoes || (full.sections as any) || []) as Secao[]);
-        setStats(full.stats || null);
-        setCurrentPautaId(latest.id);
-        setFirestoreBadge(null);
-        setSomenteCgim(true);
-      } catch {}
-    })();
-  }, [historico, currentPautaId]);
+    if (idDaUrl) {
+      if (idDaUrl !== currentPautaId) abrirPautaSalva(idDaUrl);
+      return;
+    }
+    if (currentPautaId || !historico.length) return;
+    abrirPautaSalva(historico[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idDaUrl, historico]);
+
+  // Rola até a seção indicada na URL (?secao=...)
+  useEffect(() => {
+    if (!secaoDaUrl || !secoes.length) return;
+    const idx = secoes.findIndex((s) => normKey(s.titulo) === normKey(secaoDaUrl));
+    if (idx < 0) return;
+    setTimeout(() => document.getElementById(`secao-${idx}`)?.scrollIntoView({ behavior: "smooth", block: "start" }), 300);
+  }, [secaoDaUrl, secoes]);
 
   function abrirFileDialog() { inputRef.current?.click(); }
+
+  const aplicarDiffSeHouver = async (pautaId: string) => {
+    try {
+      if (pautaBaseId && pautaBaseId !== pautaId) {
+        const resumo = await diffPautas(pautaBaseId, pautaId, { aplicarMarcacoes: true });
+        if (resumo?.contagens) {
+          setDiffResumo(resumo.contagens);
+          toast.success(`Diferenças: ${resumo.contagens.removidos} removidos · ${resumo.contagens.alterados} alterados · ${resumo.contagens.novos} novos.`);
+        }
+      } else setDiffResumo(null);
+    } catch (e) {
+      console.error(e);
+      toast.error("Falha ao comparar pautas (diff).");
+    }
+  };
 
   const processarHTML = async (file: File, buf: ArrayBuffer) => {
     const html = decodeHtmlBest(buf);
@@ -352,229 +257,122 @@ const PautaCatPage: React.FC = () => {
     const { secoes, stats } = parsePautaHtml(html);
     setSecoes(secoes);
     setStats(stats);
+    setCurrentMeeting(meeting);
 
     const fileHash = await hashDoArquivo(buf);
-    const pautaId = await (salvarPautaNoFirestoreAuto as any)(file.name, fileHash, secoes, stats, meeting);
-
-    if (pautaId) {
-      // >>> grava metadados legíveis assim que salva
-      try { await upsertPautaMetadata(pautaId, file.name, meeting || null); } catch {}
-
-      setCurrentPautaId(pautaId);
-      setFirestoreBadge("novo");
-      setDupInfo(null);
-      setHistorico((h) =>
-        [
-          {
-            id: pautaId,
-            tituloArquivo: file.name,
-            hash: fileHash,
-            itens: stats.itens,
-            tabelas: stats.tabelas,
-            secoes: stats.secoes,
-            meeting,
-          },
-          ...h,
-        ].slice(0, 5)
-      );
-
-      // aplica diff se houver pauta base informada
-      try {
-        if (pautaBaseId && pautaBaseId !== pautaId) {
-          const resumo = await diffPautas(pautaBaseId, pautaId, { aplicarMarcacoes: true });
-          if (resumo?.contagens) {
-            setDiffResumo(resumo.contagens);
-            toast.success(`Diferenças: ${resumo.contagens.removidos} removidos · ${resumo.contagens.alterados} alterados · ${resumo.contagens.novos} novos.`);
-          }
-        } else setDiffResumo(null);
-      } catch (e) {
-        console.error(e);
-        toast.error("Falha ao comparar pautas (diff).");
-      }
-    } else {
-      setFirestoreBadge("dup");
-      setDupInfo({ fileName: file.name, buf, fileHash });
+    const res = await salvarPautaNoFirestoreAuto(file.name, fileHash, secoes, stats, meeting);
+    if (!res) {
+      toast.error("Falha ao salvar a pauta.");
+      return;
     }
 
+    setCurrentPautaId(res.id);
+
+    if (res.existed) {
+      // Mesmo arquivo já importado antes: exibimos a nova extração, mas só gravamos
+      // por cima se o usuário pedir (botão "Reprocessar e sobrescrever").
+      setFirestoreBadge("dup");
+      setDupInfo({ fileName: file.name, buf, fileHash, existingId: res.id });
+      toast("Esta pauta já havia sido importada. Use “Reprocessar e sobrescrever” para gravar esta nova extração.", { icon: "ℹ️", duration: 7000 });
+      return;
+    }
+
+    try { await upsertPautaMetadata(res.id, file.name, meeting || null); } catch {}
+    setFirestoreBadge("novo");
+    setDupInfo(null);
+    setHistorico((h) =>
+      [
+        { id: res.id, tituloArquivo: file.name, hash: fileHash, itens: stats.itens, tabelas: stats.tabelas, secoes: stats.secoes, meeting },
+        ...h.filter((x) => x.id !== res.id),
+      ].slice(0, 5)
+    );
+    await aplicarDiffSeHouver(res.id);
     toast.success(`Pauta (HTML) processada: ${stats.itens} itens em ${stats.secoes} seções`);
   };
 
   const onFile = async (file: File) => {
     try {
       const buf = await file.arrayBuffer();
-      const name = (file.name || "").toLowerCase();
-      if (name.endsWith(".html") || name.endsWith(".htm")) await processarHTML(file, buf);
-      else await processarHTML(file, buf); // fallback simples
+      await processarHTML(file, buf);
     } catch (err: any) {
       console.error(err);
       toast.error("Falha ao processar o arquivo HTML");
     }
   };
 
-  // ==== NOVO: sobrescrever por ID (pauta aberta) OU localizar por hash como fallback ====
+  // Sobrescreve a pauta que já existia com o mesmo arquivo (identificada pelo hash)
   const reprocessarESobrescrever = async () => {
     if (!dupInfo) return;
     try {
-      const buf = dupInfo.buf;
-      const html = decodeHtmlBest(buf);
+      const html = decodeHtmlBest(dupInfo.buf);
       const meeting = extrairMeeting(html);
-      const novo = parsePautaHtml(html) as any;
+      const novo = parsePautaHtml(html);
+      const alvo = dupInfo.existingId;
 
-      // 1) Se há pauta aberta, sobrescreve por ID (sem hash)
-      if (currentPautaId) {
-        await updateDoc(doc(db, "pautas", currentPautaId), {
-          secoes: novo.secoes,
-          stats: novo.stats,
-          meeting: meeting || null,
-          tituloArquivo: dupInfo.fileName,
-          updatedAt: serverTimestamp(),
-        });
-        await upsertPautaMetadata(currentPautaId, dupInfo.fileName, meeting || null);
-        setSecoes(novo.secoes);
-        setStats(novo.stats);
-        setFirestoreBadge("novo");
-        setDupInfo(null);
-        toast.success("Pauta regravada (por ID da pauta aberta).");
-
-        // aplica diff se houver pauta base
-        try {
-          if (pautaBaseId && pautaBaseId !== currentPautaId) {
-            const resumo = await diffPautas(pautaBaseId, currentPautaId, { aplicarMarcacoes: true });
-            if (resumo?.contagens) {
-              setDiffResumo(resumo.contagens);
-              toast.success(`Diferenças: ${resumo.contagens.removidos} rem. · ${resumo.contagens.alterados} alt. · ${resumo.contagens.novos} novos.`);
-            }
-          } else setDiffResumo(null);
-        } catch (e) {
-          console.error(e);
-          toast.error("Falha ao comparar pautas (diff).");
-        }
-        return;
-      }
-
-      // 2) Mantém compat: tenta service por HASH
-      const fileHash = await hashDoArquivo(buf);
-      const idByService = await (regravarPautaPorHash as any)(fileHash, {
+      await updateDoc(doc(db, "pautas", alvo), {
         secoes: novo.secoes,
         stats: novo.stats,
+        meeting: meeting || null,
         tituloArquivo: dupInfo.fileName,
-        meeting,
+        updatedAt: serverTimestamp(),
       });
-      if (idByService) {
-        await upsertPautaMetadata(idByService, dupInfo.fileName, meeting || null);
-        setCurrentPautaId(idByService);
-        setSecoes(novo.secoes);
-        setStats(novo.stats);
-        setFirestoreBadge("novo");
-        setDupInfo(null);
-        toast.success("Pauta regravada (compat por hash).");
-        return;
-      }
-
-      // 3) Fallback: localizar pauta pelo hash diretamente no Firestore
-      try {
-        const snap = await getDocs(fsQuery(collection(db, "pautas"), where("hash", "==", fileHash), fsLimit(1)));
-        const id = snap.docs[0]?.id;
-        if (id) {
-          await updateDoc(doc(db, "pautas", id), {
-            secoes: novo.secoes, stats: novo.stats, meeting: meeting || null,
-            tituloArquivo: dupInfo.fileName, updatedAt: serverTimestamp(),
-          });
-          await upsertPautaMetadata(id, dupInfo.fileName, meeting || null);
-          setCurrentPautaId(id);
-          setSecoes(novo.secoes);
-          setStats(novo.stats);
-          setFirestoreBadge("novo");
-          setDupInfo(null);
-          toast.success("Pauta regravada (fallback Firestore por hash).");
-          return;
-        }
-      } catch {}
-
-      toast.error("Não foi possível localizar a pauta existente para sobrescrever.");
+      await upsertPautaMetadata(alvo, dupInfo.fileName, meeting || null);
+      setCurrentPautaId(alvo);
+      setSecoes(novo.secoes);
+      setStats(novo.stats);
+      setFirestoreBadge("novo");
+      setDupInfo(null);
+      toast.success(`Pauta regravada: ${novo.stats.itens} itens em ${novo.stats.secoes} seções.`);
+      await aplicarDiffSeHouver(alvo);
     } catch (e) {
       console.error(e);
       toast.error("Falha ao regravar.");
     }
   };
 
-  // headers util
-  const allHeaders = useMemo(() => {
-    const set = new Set<string>();
-    secoes.forEach((s) => s.headers.forEach((h) => set.add(h)));
-    return Array.from(set);
-  }, [secoes]);
-
-  const ncmHeaderName = useMemo(() => {
-    const match = allHeaders.find((h) => normKey(h).startsWith("ncm"));
-    return match || "NCM";
-  }, [allHeaders]);
-
-  const produtoHeaderName = useMemo(() => {
-    const match = allHeaders.find((h) => normKey(h).startsWith("produto"));
-    return match || "Produto";
-  }, [allHeaders]);
-
-  const pleiteanteHeaderName = useMemo(() => {
-    const match = allHeaders.find((h) => normKey(h).includes("pleiteante"));
-    return match || "Pleiteante";
-  }, [allHeaders]);
-
   // Filtradas por CGIM
   const secoesFiltradas = useMemo(() => {
     if (!somenteCgim || ncmSet.size === 0) return secoes;
     const fil = secoes.map((sec) => {
       const rows = sec.rows.filter((r) => {
-        const ncm = String(r[ncmHeaderName] || "").replace(/\D/g, "");
+        const ncm = projectLinha(r).ncm.replace(/\D/g, "").slice(0, 8);
         return ncm && ncmSet.has(ncm);
       });
       return { ...sec, rows, qtd: rows.length };
     });
     return fil.filter((s) => s.qtd > 0);
-  }, [secoes, somenteCgim, ncmSet, ncmHeaderName]);
+  }, [secoes, somenteCgim, ncmSet]);
 
   // Carregar atribuições sempre que as seções mudarem
   useEffect(() => {
     (async () => {
       const keys: string[] = [];
-      for (const s of secoes) {
-        for (const r of s.rows) {
-          const rowForKey = {
-            NCM: onlyDigits(String(r[ncmHeaderName] || "")),
-            Produto: String(r[produtoHeaderName] || ""),
-            Pleiteante: String(r[pleiteanteHeaderName] || ""),
-          } as Record<string, string>;
-          keys.push(gerarPleitoKey(rowForKey));
-        }
-      }
+      for (const s of secoes) for (const r of s.rows) keys.push(pleitoKeyFromRow(r));
       if (!keys.length) { setAtribs({}); return; }
       try { const map = await carregarAtribuicoesPorChaves(keys); setAtribs(map); }
       catch { setAtribs({}); }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [secoes, ncmHeaderName, produtoHeaderName, pleiteanteHeaderName]);
+  }, [secoes]);
 
   // Handler de atribuição
   const onAtribuir = async (row: Record<string, string>, tituloSecao: string, novoResp: string) => {
-    const rowForKey = {
-      NCM: onlyDigits(String(row[ncmHeaderName] || "")),
-      Produto: String(row[produtoHeaderName] || ""),
-      Pleiteante: String(row[pleiteanteHeaderName] || ""),
-    } as Record<string, string>;
-
-    const key = gerarPleitoKey(rowForKey);
+    const p = projectLinha(row);
+    const key = pleitoKeyFromRow(row);
+    const remover = !novoResp || novoResp === "—";
     try {
       await salvarAtribuicaoPleito({
         pleitoKey: key,
-        responsavelNome: novoResp || "—", // "—" apaga
-        ncm: rowForKey.NCM,
-        produto: rowForKey.Produto,
-        pleiteante: rowForKey.Pleiteante,
+        responsavelNome: remover ? null : novoResp,
+        ncm: p.ncm.replace(/\D+/g, ""),
+        produto: p.produto,
+        pleiteante: p.pleiteante,
+        tipoPleito: p.tipoPleito || undefined,
+        notaTecnica: p.notaTecnica || undefined,
         pautaId: currentPautaId || undefined,
         tituloSecao,
       });
-      setAtribs((m) => ({ ...m, [key]: novoResp === "—" ? "" : novoResp }));
-      toast.success(novoResp && novoResp !== "—" ? `Atribuído a ${novoResp}` : "Atribuição removida.");
+      setAtribs((m) => ({ ...m, [key]: remover ? "" : novoResp }));
+      toast.success(remover ? "Atribuição removida." : `Atribuído a ${novoResp}`);
     } catch (e) {
       console.error(e);
       toast.error("Falha ao salvar atribuição.");
@@ -639,12 +437,12 @@ const PautaCatPage: React.FC = () => {
               <button
                 onClick={reprocessarESobrescrever}
                 className="px-3 py-2 rounded bg-violet-600 text-white hover:bg-violet-700"
-                title="Sobrescreve a pauta ABERTA (por ID) ou tenta localizar por hash"
+                title="Grava esta nova extração por cima da pauta importada anteriormente com o mesmo arquivo"
               >
                 Reprocessar e sobrescrever
               </button>
               <span className="text-xs text-slate-600">
-                Dica: abra a pauta que deseja atualizar e clique em “Reprocessar e sobrescrever”.
+                Este arquivo já havia sido importado. Clique para gravar a nova extração (as atribuições e análises são mantidas).
               </span>
             </>
           )}
@@ -653,7 +451,7 @@ const PautaCatPage: React.FC = () => {
             <span className="px-2 py-1 text-sm rounded bg-green-100 text-green-800">salvo no Firestore</span>
           )}
           {firestoreBadge === "dup" && (
-            <span className="px-2 py-1 text-sm rounded bg-yellow-100 text-yellow-800">já existia (hash)</span>
+            <span className="px-2 py-1 text-sm rounded bg-yellow-100 text-yellow-800">já importada antes</span>
           )}
 
           {/* Toggle CGIM */}
@@ -663,6 +461,11 @@ const PautaCatPage: React.FC = () => {
           </label>
         </div>
 
+        {currentPautaId && (
+          <div className="text-sm mt-3 text-slate-700">
+            Pauta aberta: <b>{currentMeeting || "—"}</b> <span className="text-xs text-slate-500">(ID {currentPautaId})</span>
+          </div>
+        )}
         {stats && (
           <div className="text-sm mt-2 text-gray-600">
             Seções detectadas: <b>{stats.secoes}</b> &nbsp;&nbsp; Tabelas consideradas: <b>{stats.tabelas}</b> &nbsp;&nbsp; Pleitos extraídos: <b>{stats.itens}</b>
@@ -695,18 +498,7 @@ const PautaCatPage: React.FC = () => {
                   <div className="mt-2 flex gap-2">
                     <button
                       className="px-2 py-1 text-xs rounded bg-gray-200 hover:bg-gray-300"
-                      onClick={async () => {
-                        try {
-                          const full = await carregarPautaCompleta(p.id);
-                          setSecoes((full.secoes || []) as Secao[]);
-                          setStats(full.stats || null);
-                          setCurrentPautaId(p.id);
-                          setFirestoreBadge(null);
-                          toast.success("Pauta carregada do histórico.");
-                        } catch {
-                          toast.error("Falha ao abrir pauta do histórico.");
-                        }
-                      }}
+                      onClick={() => abrirPautaSalva(p.id, "Pauta carregada do histórico.")}
                     >
                       abrir
                     </button>
@@ -720,12 +512,16 @@ const PautaCatPage: React.FC = () => {
 
       {/* Render das seções */}
       {secoesFiltradas.map((sec, idxSec) => {
-        const baseHeaders = sec.headers.filter((h) => !!norm(h) && norm(h) !== "—");
-        const sanitizedHeaders = dedupeHeaders(baseHeaders);
+        // união dos cabeçalhos da seção com as chaves das linhas: pautas gravadas
+        // antes da correção do parser podem ter linhas com colunas diferentes
+        const headerSet: string[] = [...sec.headers];
+        for (const r of sec.rows) for (const k of Object.keys(r)) if (!headerSet.includes(k) && !k.startsWith("__") && k !== "statusVigencia") headerSet.push(k);
+        const baseHeaders = headerSet.filter((h) => !!norm(h) && norm(h) !== "—");
+        const sanitizedHeaders = Array.from(new Set(baseHeaders));
         const headers = [...sanitizedHeaders, "Responsável"];
 
         return (
-          <div key={`${sec.titulo}-${idxSec}`} className="mb-8 bg-white border rounded">
+          <div key={`${sec.titulo}-${idxSec}`} id={`secao-${secoes.findIndex((x) => x.titulo === sec.titulo)}`} className="mb-8 bg-white border rounded scroll-mt-4">
             <div className="px-4 py-3 border-b font-semibold flex items-center justify-between">
               <span className="break-words">{String(sec.titulo)}</span>
               <span className="text-sm text-gray-500">{Number(sec.qtd) || 0} pleitos</span>
@@ -752,12 +548,7 @@ const PautaCatPage: React.FC = () => {
                 </thead>
                 <tbody>
                   {sec.rows.map((row, rIdx) => {
-                    const rowForKey = {
-                      NCM: onlyDigits(String(row[ncmHeaderName] || "")),
-                      Produto: String(row[produtoHeaderName] || ""),
-                      Pleiteante: String(row[pleiteanteHeaderName] || ""),
-                    } as Record<string, string>;
-                    const key = gerarPleitoKey(rowForKey);
+const key = pleitoKeyFromRow(row);
                     const atual = atribs[key] || "";
 
                     return (
@@ -788,6 +579,9 @@ const PautaCatPage: React.FC = () => {
                               {ANALISTAS.map((n) => (
                                 <option key={n} value={n}>{n}</option>
                               ))}
+                              {atual && !(ANALISTAS as readonly string[]).includes(atual) ? (
+                                <option value={atual}>{atual}</option>
+                              ) : null}
                             </select>
                             {atual ? <span className="text-xs px-2 py-1 rounded bg-blue-50 text-blue-700">{atual}</span> : null}
                           </div>

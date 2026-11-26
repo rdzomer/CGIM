@@ -1,5 +1,5 @@
 // src/pages/HistoricoPautasPage.tsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getFirestore, collection, getDocs, deleteDoc, doc } from "firebase/firestore";
 import { getNcmSetCgim } from "../services/ncmsService";
@@ -99,7 +99,7 @@ async function buildRawList(): Promise<RawPauta[]> {
     const base = baseNameFor(p) || d.id;
     arr.push({
       id: d.id,
-      tituloArquivo: safeStr(p?.arquivo, "—"),
+      tituloArquivo: safeStr(p?.tituloArquivo || p?.arquivo, "—"),
       baseName: base,
       createdAtMs: uploadTs(p),
       isRet: isRetFlag(p),

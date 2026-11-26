@@ -12,6 +12,7 @@ import {
 } from "firebase/firestore";
 import { Download, Printer } from "lucide-react";
 import { exportRelatorioDocx, CabecalhoRelatorio } from "../services/relatorioExport";
+import { pleitoKeyFromRow } from "../services/pleitoFields";
 
 /** ===================== Utils ===================== */
 const norm = (s?: any) =>
@@ -226,10 +227,9 @@ function projectLinha(row: Record<string, any>) {
   return { ncm, produto, pleiteante, tipoPleito };
 }
 
+/** Chave "suave" (sem acentos/caixa/pontuação) da linha — para comparar com softKey(pleitoKey). */
 function gerarPleitoKeyFromRow(row: any) {
-  const { ncm, produto, pleiteante } = projectLinha(row);
-  const key = [only8(ncm), softKey(produto), softKey(pleiteante)].filter(Boolean).join("|");
-  return key;
+  return softKey(pleitoKeyFromRow(row));
 }
 
 function unificarAnalise(a: Atribuicao): NonNullable<AnaliseBloco> {
@@ -399,17 +399,15 @@ const RelatorioConsolidadoPage: React.FC = () => {
         snap1.forEach((d) => arr.push({ id: d.id, ...(d.data() as any) }));
 
         if (pautaDoc) {
+          // Pleitos desta pauta cuja atribuição está ligada a outra pauta (ex.: o mesmo
+          // pleito reapareceu numa reunião posterior): busca pela pleitoKey EXATA.
           const rows = flattenPauta(pautaDoc);
-          const keysSet = new Set<string>();
-          for (const { row } of rows) {
-            const k = gerarPleitoKeyFromRow(row);
-            if (k) keysSet.add(softKey(k));
-          }
-
           const jaTem = new Set<string>(
             arr.map((a) => softKey(String(a.pleitoKey || ""))).filter(Boolean)
           );
-          const missing = Array.from(keysSet).filter((k) => k && !jaTem.has(k));
+          const missing = Array.from(
+            new Set(rows.map(({ row }) => pleitoKeyFromRow(row)).filter(Boolean))
+          ).filter((k) => !jaTem.has(softKey(k)));
 
           for (let i = 0; i < missing.length; i += 10) {
             const chunk = missing.slice(i, i + 10);
@@ -440,17 +438,12 @@ const RelatorioConsolidadoPage: React.FC = () => {
 
     const byKey = new Map<string, Atribuicao>();
     const byPair = new Map<string, Atribuicao>();
-    const byPair2 = new Map<string, Atribuicao>();
 
     for (const a of atribuicoes) {
       const ncm8 = only8(a.ncm);
       const prod = softKey(a.produto);
-      const pl = softKey(a.pleiteante || "");
-      const pair = `${ncm8}|${prod}`;
-      const pair2 = `${ncm8}|${pl}`;
       if (a.pleitoKey) byKey.set(softKey(a.pleitoKey), a);
-      if (ncm8 && prod) byPair.set(pair, a);
-      if (ncm8 && pl) byPair2.set(pair2, a);
+      if (ncm8 && prod) byPair.set(`${ncm8}|${prod}`, a);
     }
 
     function isOk(at?: Atribuicao) {
@@ -467,41 +460,20 @@ const RelatorioConsolidadoPage: React.FC = () => {
       const prodSoft = softKey(produto);
       const pleitSoft = softKey(pleiteante);
 
-      let a: Atribuicao | undefined =
-        byKey.get(keySoft) ||
-        byPair.get(`${n8}|${prodSoft}`) ||
-        byPair2.get(`${n8}|${pleitSoft}`);
+      // 1) chave do pleito; 2) NCM + produto idênticos
+      let a: Atribuicao | undefined = byKey.get(keySoft) || byPair.get(`${n8}|${prodSoft}`);
 
-      if (!a && n8) {
-        const cands = atribuicoes.filter((x) => only8(x.ncm) === n8);
-        const found = cands.find((x) => {
+      // 3) mesma NCM e mesmo pleiteante, com um produto contido no outro
+      //    (pequenas edições de texto entre versões da pauta). Nunca casa só por
+      //    NCM + pleiteante: dois pleitos da mesma empresa na mesma NCM (ex.: os
+      //    dois cabos da 79ª reunião) receberiam a mesma análise.
+      if (!a && n8 && prodSoft) {
+        a = atribuicoes.find((x) => {
+          if (only8(x.ncm) !== n8) return false;
+          if (pleitSoft && softKey(x.pleiteante || "") !== pleitSoft) return false;
           const ps = softKey(x.produto);
-          return ps && prodSoft && (ps.includes(prodSoft) || prodSoft.includes(ps));
+          return !!ps && (ps.includes(prodSoft) || prodSoft.includes(ps));
         });
-        if (found) a = found;
-      }
-
-      if (!a && n8) {
-        const cands = atribuicoes.filter((x) => only8(x.ncm) === n8);
-        const found = cands.find((x) => {
-          const pls = softKey(x.pleiteante || "");
-          return pls && pleitSoft && (pls.includes(pleitSoft) || pleitSoft.includes(pls));
-        });
-        if (found) a = found;
-      }
-
-      if (!a) {
-        let best: { a: Atribuicao; score: number } | null = null;
-        for (const x of atribuicoes) {
-          let s = 0;
-          if (only8(x.ncm) === n8 && n8) s += 2;
-          const xp = softKey(x.produto);
-          const xl = softKey(x.pleiteante || "");
-          if (xp && prodSoft) s += xp === prodSoft ? 2 : (xp.includes(prodSoft) || prodSoft.includes(xp) ? 1 : 0);
-          if (xl && pleitSoft) s += xl === pleitSoft ? 2 : (xl.includes(pleitSoft) || pleitSoft.includes(xl) ? 1 : 0);
-          if (s > 2 && (!best || s > best.score)) best = { a: x, score: s };
-        }
-        if (best) a = best.a;
       }
 
       if (!isOk(a)) continue;
@@ -669,7 +641,7 @@ const RelatorioConsolidadoPage: React.FC = () => {
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
 
-    const w = window.open(url, "_blank", "noopener,noreferrer,width=1024,height=800");
+    const w = window.open(url, "_blank", "width=1024,height=800");
     if (w && !w.closed) {
       const revoke = () => URL.revokeObjectURL(url);
       const timer = setTimeout(revoke, 60_000);

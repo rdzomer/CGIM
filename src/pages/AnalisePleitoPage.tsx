@@ -5,7 +5,6 @@ import {
   doc,
   getDoc,
   getFirestore,
-  updateDoc,
   serverTimestamp,
   setDoc,
   deleteDoc,
@@ -18,6 +17,8 @@ import {
   upsertHistoricoFromAtribuicao,
 } from "../services/historicoAnalisesService";
 import { makeAtribuicaoId } from "../services/atribuicoesService";
+import { resolverAnalista } from "../services/analistas";
+import { projectLinha, flattenPautaRows, findRowForPleito, splitNotasTecnicas } from "../services/pleitoFields";
 
 /* ----------------------------- Tipos ----------------------------- */
 type Analise = { resumo?: string; comercio?: string; tecnica?: string; sugestao?: string };
@@ -40,6 +41,7 @@ type Atrib = {
   statusCode?: "em_analise" | "concluido" | "nao_iniciado";
   analise?: Analise | null;
   linhaPauta?: any;
+  notaTecnica?: string;
   posDeliberacao?: PosDeliberacao | null;
 
   // metadados do analista
@@ -85,7 +87,9 @@ const fmtNCM = (s?: string) => {
   return n8.length === 8 ? `${n8.slice(0, 4)}.${n8.slice(4, 6)}.${n8.slice(6, 8)}` : (s || "—");
 };
 
-const HIDDEN_KEYS = /(key|pleitokey|__sec|_id|id|timestamp|created|updated|hash|vers[aã]o|revindex)/i;
+const HIDDEN_KEYS = /(^key$|pleitokey|__sec|^_?id$|timestamp|created|updated|hash|vers[aã]o|revindex|statusvigencia)/i;
+/** Colunas já exibidas na ficha (cabeçalho, "Dados resumidos" ou Nota Técnica). */
+const FICHA_JA_EXIBIDA = /(^ncm|produto|pleiteante|tipo d[eo] p|processo|^pais|prazo|situa|nota.*tecnic|fundamenta|justificativa)/;
 
 const hasContent = (a?: Analise | null) =>
   !!(
@@ -103,7 +107,7 @@ function normalizeSeiList(value?: string | string[]): string[] {
 
   const seen = new Set<string>();
   const out: string[] = [];
-  const rx = /\b\d{5}\.\d{6}\/\d{4}-\d{2}\b/g; // padrão SEI
+  const rx = /\d{5}\.\d{6}\/\d{4}-\d{2}/g; // padrão SEI (sem \b: o SEI às vezes cola dois números)
 
   for (const raw of inputs) {
     const s = String(raw ?? "");
@@ -116,47 +120,6 @@ function normalizeSeiList(value?: string | string[]): string[] {
     }
   }
   return out;
-}
-
-// ===== helpers para varrer a Pauta (fallback de SEI) =====
-function flattenPauta(p: any): Array<{ secao: string; row: any }> {
-  const out: Array<{ secao: string; row: any }> = [];
-  const list =
-    (Array.isArray(p?.sections) ? p.sections : undefined) ??
-    (Array.isArray(p?.secoes) ? p.secoes : undefined) ??
-    [];
-
-  const pushRows = (secTitle: string, rows?: any[]) => {
-    if (!Array.isArray(rows)) return;
-    rows.forEach((r) => out.push({ secao: secTitle, row: r }));
-  };
-
-  for (const sec of list as any[]) {
-    const secTitle = String(sec?.title ?? sec?.titulo ?? "") || "";
-    pushRows(secTitle, sec?.rows);
-    if (Array.isArray(sec?.tabelas)) for (const t of sec.tabelas) pushRows(secTitle, t?.rows);
-    if (Array.isArray(sec?.tables))  for (const t of sec.tables)  pushRows(secTitle, t?.rows);
-  }
-  return out;
-}
-function projectLinha(row: Record<string, any>) {
-  const keys = Object.keys(row || {});
-  const by = (labels: string[]) => {
-    const hit =
-      keys.find((k) => labels.some((l) => normKey(k) === normKey(l))) ??
-      keys.find((k) => labels.some((l) => normKey(k).includes(normKey(l))));
-    return hit ? String(row[hit] ?? "") : "";
-  };
-  const ncm = by(["NCM", "Código NCM", "Codigo NCM", "Código", "Codigo", "NCM 8"]);
-  const produto = by(["Produto","Descrição do Produto","Descricao do Produto","Produto/Descrição","Produto/Descricao","Descrição","Descricao"]);
-  const pleiteante = by(["Pleiteante","Requerente","Solicitante","Empresa"]);
-  return { ncm, produto, pleiteante };
-}
-const only8 = (s?: any) => norm(s).replace(/\D+/g, "").slice(0, 8);
-function gerarPleitoKeyFromRow(row: any) {
-  const { ncm, produto, pleiteante } = projectLinha(row);
-  const key = [only8(ncm), norm(produto), norm(pleiteante)].filter(Boolean).join("|");
-  return key;
 }
 
 // ===== util p/ caçar valores por alias em “fontes” variadas =====
@@ -174,6 +137,13 @@ function pickFromSources(sources: any[], aliases: string[], { raw = false }: { r
     }
   }
   return undefined;
+}
+
+/** Remove campos undefined (o Firestore rejeita undefined). */
+function semUndefined<T extends Record<string, any>>(o: T): T {
+  const out: any = {};
+  for (const [k, v] of Object.entries(o)) if (v !== undefined) out[k] = v;
+  return out;
 }
 
 /* ---------------------- Normalização de status ---------------------- */
@@ -208,6 +178,7 @@ const AnalisePleitoPage: React.FC = () => {
 
   const copyFrom = params.get("copyFrom") || "";
   const isBlank = ["1", "true", "yes", "on"].includes((params.get("blank") || "").toLowerCase());
+  const readOnly = ["1", "true", "yes", "on"].includes((params.get("readonly") || "").toLowerCase());
 
   // Metadados vindos por querystring (quando abre pela Minhas Tarefas)
   const pautaIdQS = params.get("pautaId") || "";
@@ -238,6 +209,7 @@ const AnalisePleitoPage: React.FC = () => {
   const [draftLoadedFrom, setDraftLoadedFrom] = useState<"histórico" | null>(null);
 
   const [copiedSei, setCopiedSei] = useState<string | null>(null);
+  const [notasTecnicas, setNotasTecnicas] = useState<string[]>([]);
 
   const [prevIdMigrated, setPrevIdMigrated] = useState<string | null>(null);
   const [isRetificadora, setIsRetificadora] = useState<boolean>(false);
@@ -276,6 +248,7 @@ const AnalisePleitoPage: React.FC = () => {
             status: v?.status || "Não iniciado",
             statusCode: v?.statusCode || "nao_iniciado",
             linhaPauta: v?.linhaPauta || null,
+            notaTecnica: v?.notaTecnica || "",
             analise: v?.analise || null,
             posDeliberacao: v?.posDeliberacao || null,
             analistaUid: v?.analistaUid,
@@ -308,6 +281,7 @@ const AnalisePleitoPage: React.FC = () => {
             status: v?.status || "Não iniciado",
             statusCode: v?.statusCode || "nao_iniciado",
             linhaPauta: v?.linhaPauta || null,
+            notaTecnica: v?.notaTecnica || "",
             analise: v?.analise || null,
             posDeliberacao: v?.posDeliberacao || null,
             analistaUid: v?.analistaUid,
@@ -382,63 +356,61 @@ const AnalisePleitoPage: React.FC = () => {
         }
       } catch {}
 
-      // 6) Monta ficha a partir da linha da pauta
-      const base: any = (loaded as any)?.linhaPauta || {};
-      const fichaLocal: Record<string, string> = {};
-      Object.entries(base).forEach(([k, val]) => {
-        const keyLower = k.toLowerCase();
-        if (HIDDEN_KEYS.test(keyLower)) return;
-        const str = String(val ?? "").trim();
-        if (!str) return;
-        fichaLocal[mapHeader(k)] = str;
-      });
-      setFicha(fichaLocal);
+      // 6) Pós-deliberação já salva
+      setPos((loaded.posDeliberacao as PosDeliberacao) || {});
 
-      // 7) tenta doc do pleito
+      // 7) tenta doc do pleito (legado)
       let pleitoDocData: any = null;
       try {
         const pk = loaded.pleitoKey || pleitoKeyQS;
-        if (pk) {
+        if (pk && !pk.includes("/")) {
           const ps = await getDoc(doc(db, "pleitos", pk));
           if (ps.exists()) pleitoDocData = ps.data();
         }
       } catch {}
 
-      // 8) pedido primário (linha + doc pleito)
-      let pedidoLocal = extrairPedidoAmplo(base, pleitoDocData);
-      setPedido(pedidoLocal);
-
-      // 9) fallback por pauta para processo SEI
-      if ((!pedidoLocal?.processoSei || (Array.isArray(pedidoLocal.processoSei) && pedidoLocal.processoSei.length === 0)) && loaded.pautaId) {
+      // 8) Linha da pauta: fonte da ficha, do processo SEI e da Nota Técnica
+      const base: any = (loaded as any)?.linhaPauta || {};
+      let linha: Record<string, any> | null = Object.keys(base).length ? base : null;
+      // procura primeiro na pauta aberta pelo analista; depois na pauta gravada na atribuição
+      const pautasCandidatas = Array.from(new Set([pautaIdQS, loaded.pautaId].filter(Boolean))) as string[];
+      for (const pid of pautasCandidatas) {
         try {
-          const pautaSnap = await getDoc(doc(db, "pautas", loaded.pautaId));
-          if (pautaSnap.exists()) {
-            const pauta = pautaSnap.data();
-            const rows = flattenPauta(pauta);
-            const alvo = rows.find(({ row }) => {
-              const keyRow = gerarPleitoKeyFromRow(row);
-              const byKey = loaded.pleitoKey && norm(keyRow) === norm(loaded.pleitoKey);
-              const { ncm, produto } = projectLinha(row);
-              const byPair =
-                only8(ncm) === only8(loaded.ncm) &&
-                normKey(produto) === normKey(loaded.produto);
-              return byKey || byPair;
-            })?.row;
-
-            if (alvo) {
-              const pedidoDoAlvo = extrairPedidoAmplo(alvo, undefined);
-              pedidoLocal = {
-                ...pedidoLocal,
-                processoSei: normalizeSeiList(pedidoLocal.processoSei as any).length
-                  ? pedidoLocal.processoSei
-                  : pedidoDoAlvo.processoSei,
-                processoSeiLinks: (pedidoLocal.processoSeiLinks?.length ? pedidoLocal.processoSeiLinks : pedidoDoAlvo.processoSeiLinks) as any,
-              };
-              setPedido(pedidoLocal);
-            }
+          const pautaSnap = await getDoc(doc(db, "pautas", pid));
+          if (!pautaSnap.exists()) continue;
+          const achado = findRowForPleito(flattenPautaRows(pautaSnap.data()), {
+            pleitoKey: loaded.pleitoKey || pleitoKeyQS,
+            ncm: loaded.ncm,
+            produto: loaded.produto,
+          });
+          if (achado) {
+            linha = { ...achado.row, ...(linha || {}) };
+            if (!loaded.tituloSecao && achado.secao) loaded.tituloSecao = achado.secao;
+            const pr = projectLinha(achado.row);
+            if (!loaded.tipoPleito && pr.tipoPleito) loaded.tipoPleito = pr.tipoPleito;
+            break;
           }
         } catch {}
       }
+
+      const pedidoLocal = extrairPedidoAmplo(linha || {}, pleitoDocData);
+      setPedido(pedidoLocal);
+
+      const notaDaLinha = linha ? projectLinha(linha).notaTecnica : "";
+      setNotasTecnicas(splitNotasTecnicas(notaDaLinha || loaded.notaTecnica || ""));
+
+      // "Outros campos": colunas da pauta que não aparecem em outro lugar da ficha
+      const fichaLocal: Record<string, string> = {};
+      Object.entries(linha || {}).forEach(([k, val]) => {
+        const nk = normKey(k);
+        if (k.startsWith("__") || HIDDEN_KEYS.test(nk) || FICHA_JA_EXIBIDA.test(nk)) return;
+        if (nk === "#" || nk === "no" || nk === "nº" || /^col_\d+$/.test(nk)) return;
+        const str = String(val ?? "").trim();
+        if (!str) return;
+        fichaLocal[mapHeader(k)] = str;
+      });
+      setFicha(fichaLocal);
+      setAtr({ ...loaded });
 
       // 10) Se abrimos com atrId legado e não existia targetDocId, migra para o novo
       if (atrId && targetDocId && atrId !== targetDocId) {
@@ -476,8 +448,10 @@ const AnalisePleitoPage: React.FC = () => {
 
   /* ------------------------------ salvar análise ------------------------------ */
   async function salvar(statusWish?: string) {
-    if (!targetDocId || !pleitoKeyQS) {
-      toast.error("pleitoKey ausente. Volte para Minhas Tarefas e reabra o item.");
+    if (readOnly) return;
+    const pleitoKeyAtual = atr?.pleitoKey || pleitoKeyQS || "";
+    if (!targetDocId || !pleitoKeyAtual) {
+      toast.error("Não foi possível identificar o pleito. Volte para Minhas Tarefas e reabra o item.");
       return;
     }
     setSalvando(true);
@@ -491,9 +465,9 @@ const AnalisePleitoPage: React.FC = () => {
           tecnica: form.tecnica || "",
           sugestao: form.sugestao || "",
         },
-        // metadados da URL (sempre atualizados; **preferir a pauta da QS**)
+        // metadados (preferir a pauta da URL, que é a que o analista está trabalhando)
         pautaId: pautaIdQS || atr?.pautaId || "",
-        pleitoKey: atr?.pleitoKey || pleitoKeyQS || "",
+        pleitoKey: pleitoKeyAtual,
         ncm: atr?.ncm || ncmQS || "",
         produto: atr?.produto || produtoQS || "",
         pleiteante: atr?.pleiteante || pleiteanteQS || "",
@@ -501,16 +475,21 @@ const AnalisePleitoPage: React.FC = () => {
         tituloSecao: atr?.tituloSecao || tituloSecaoQS || "",
         updatedAt: serverTimestamp(),
       };
+      if (notasTecnicas.length) payload.notaTecnica = notasTecnicas.join(" ");
 
       if (user) {
-        payload.analistaUid = user.uid;
-        payload.analistaEmail = user.email?.toLowerCase();
-        payload.analistaNome = user.displayName || "";
+        // Quem salvou fica registrado à parte; o RESPONSÁVEL atribuído na Pauta CAT
+        // não é alterado (antes ele era sobrescrito e a atribuição "sumia").
+        payload.editadoPorUid = user.uid;
+        payload.editadoPorEmail = (user.email || "").toLowerCase();
+        payload.editadoPorNome = user.displayName || "";
 
-        // **Aliases compatíveis com páginas antigas**
-        payload.responsavelUid = user.uid;
-        payload.responsavelEmail = (user.email || "").toLowerCase();
-        payload.responsavelNome = user.displayName || "";
+        const semResponsavel = !atr?.responsavelNome && !atr?.responsavelUid;
+        if (semResponsavel) {
+          payload.responsavelNome = resolverAnalista(user.displayName, user.email) || user.displayName || user.email || "";
+          payload.responsavelUid = user.uid;
+          payload.responsavelEmail = (user.email || "").toLowerCase();
+        }
       }
 
       if (status && code) {
@@ -519,17 +498,17 @@ const AnalisePleitoPage: React.FC = () => {
         if (code === "concluido") payload.concludedAt = serverTimestamp();
       }
 
-      // **1) SALVAR NO DOC-ID ÚNICO (pleitoKey)**
+      // 1) Salva no doc de ID único (derivado da pleitoKey)
       await setDoc(doc(db, "atribuicoes", targetDocId), payload, { merge: true });
 
-      // **2) ESPELHAR NO DOC LEGADO (atrId), SE EXISTIR E FOR DIFERENTE**
+      // 2) Espelha no doc legado (atrId), se existir e for diferente
       if (atrId && atrId !== targetDocId) {
-        const mirror: any = {
+        const mirror = semUndefined({
           analise: payload.analise,
           status: payload.status,
           statusCode: payload.statusCode,
           updatedAt: serverTimestamp(),
-          concludedAt: payload.concludedAt ?? null,
+          concludedAt: payload.concludedAt,
           redirectTo: targetDocId,
           pautaId: payload.pautaId,
           pleitoKey: payload.pleitoKey,
@@ -538,42 +517,37 @@ const AnalisePleitoPage: React.FC = () => {
           pleiteante: payload.pleiteante,
           tipoPleito: payload.tipoPleito,
           tituloSecao: payload.tituloSecao,
-          analistaUid: payload.analistaUid,
-          analistaEmail: payload.analistaEmail,
-          analistaNome: payload.analistaNome,
-          responsavelUid: payload.responsavelUid,
-          responsavelEmail: payload.responsavelEmail,
-          responsavelNome: payload.responsavelNome,
-        };
+        });
         try {
           await setDoc(doc(db, "atribuicoes", atrId), mirror, { merge: true });
         } catch (e) {
-          // não impedir a conclusão se der erro no espelho
           console.warn("Falha ao espelhar no doc legado:", e);
         }
       }
 
-      // Se migramos anteriormente, opcionalmente remover o legado:
       if (prevIdMigrated && prevIdMigrated !== targetDocId) {
         try { await deleteDoc(doc(db, "atribuicoes", prevIdMigrated)); } catch {}
       }
 
-      // Estado local
-      setAtr((prev) =>
-        prev
-          ? {
-              ...prev,
-              ...payload,
-            }
-          : ({ id: targetDocId, ...payload } as Atrib)
-      );
+      setAtr((prev) => (prev ? { ...prev, ...payload } : ({ id: targetDocId, ...payload } as Atrib)));
 
-      // Histórico
-      try { await upsertHistoricoFromAtribuicao(db, targetDocId); } catch {}
+      // Histórico de análises (usado como rascunho em pautas futuras)
+      try {
+        await upsertHistoricoFromAtribuicao(db, {
+          id: targetDocId,
+          pautaId: payload.pautaId,
+          pleitoKey: payload.pleitoKey,
+          ncm: payload.ncm,
+          produto: payload.produto,
+          pleiteante: payload.pleiteante,
+          analise: payload.analise,
+          updatedAt: new Date(),
+        });
+      } catch (e) {
+        console.warn("Falha ao atualizar histórico de análises:", e);
+      }
 
       toast.success(status === "Concluído" ? "Análise concluída." : "Análise salva.");
-
-      // UX: ao concluir, voltar para minhas tarefas
       if (status === "Concluído") navigate("/minhas-tarefas");
     } catch (err: any) {
       console.error(err);
@@ -586,7 +560,7 @@ const AnalisePleitoPage: React.FC = () => {
 
   /* --------------------------- salvar pós-deliberação -------------------------- */
   async function salvarPosDeliberacao() {
-    if (!targetDocId) return;
+    if (!targetDocId || readOnly) return;
     setSalvando(true);
     try {
       await setDoc(
@@ -733,6 +707,22 @@ const AnalisePleitoPage: React.FC = () => {
 
   return (
     <div className="w-full p-6 space-y-6">
+      {readOnly && (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-slate-700 flex items-center justify-between gap-3">
+          <span>Visualização somente leitura (aberta pelo Dashboard).</span>
+          <button
+            className="px-3 py-1.5 rounded border text-sm bg-white hover:bg-gray-50"
+            onClick={() => {
+              const qs = new URLSearchParams(location.search);
+              qs.delete("readonly");
+              navigate(`${location.pathname}?${qs.toString()}`, { replace: true });
+            }}
+          >
+            Editar
+          </button>
+        </div>
+      )}
+
       {/* Aviso de retificadora */}
       {isRetificadora && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900">
@@ -792,27 +782,31 @@ const AnalisePleitoPage: React.FC = () => {
             <button
               className="px-4 py-2.5 rounded-xl border hover:bg-gray-50"
               onClick={() =>
-                (atr.pautaId || pautaIdQS)
-                  ? window.open(`/pauta/${encodeURIComponent(atr.pautaId || pautaIdQS)}?secao=${encodeURIComponent(atr.tituloSecao || tituloSecaoQS || "")}`, "_blank")
+                (pautaIdQS || atr.pautaId)
+                  ? window.open(`/pauta?id=${encodeURIComponent(pautaIdQS || atr.pautaId || "")}&secao=${encodeURIComponent(atr.tituloSecao || tituloSecaoQS || "")}`, "_blank")
                   : toast.error("Pauta sem ID.")
               }
             >
               Abrir pauta
             </button>
-            <button
-              className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
-              disabled={salvando}
-              onClick={() => salvar("Em análise")}
-            >
-              Salvar análise
-            </button>
-            <button
-              className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700"
-              disabled={salvando}
-              onClick={() => salvar("Concluído")}
-            >
-              Concluir
-            </button>
+            {!readOnly && (
+              <>
+                <button
+                  className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
+                  disabled={salvando}
+                  onClick={() => salvar("Em análise")}
+                >
+                  Salvar análise
+                </button>
+                <button
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700"
+                  disabled={salvando}
+                  onClick={() => salvar("Concluído")}
+                >
+                  Concluir
+                </button>
+              </>
+            )}
           </div>
         </div>
       </section>
@@ -829,6 +823,25 @@ const AnalisePleitoPage: React.FC = () => {
           <Info label="Tipo de Pleito" value={atr.tipoPleito || tipoPleitoQS || "—"} />
           <Info label="Produto (pleito)" value={atr.produto || produtoQS || "—"} className="md:col-span-2" />
           <Info label="Pleiteante" value={atr.pleiteante || pleiteanteQS || "—"} className="md:col-span-2" />
+        </div>
+
+        {/* ===== Nota(s) Técnica(s) da SE/CAMEX ===== */}
+        <div className="mt-4 rounded-lg border border-indigo-200 bg-indigo-50/60 p-3">
+          <div className="text-xs font-medium text-indigo-800 mb-1">Nota Técnica (SE/CAMEX)</div>
+          {notasTecnicas.length === 0 ? (
+            <div className="text-sm text-gray-600">Esta seção da pauta não traz Nota Técnica.</div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {notasTecnicas.map((nt, i) => (
+                <div key={`${nt}-${i}`} className="flex items-center gap-2 text-sm">
+                  <span className="font-medium text-gray-900">{nt}</span>
+                  <button className="rounded-md border px-1.5 text-xs bg-white hover:bg-gray-50" onClick={() => handleCopySei(nt)} title="Copiar">
+                    Copiar
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* ===== Dados resumidos (com Processo SEI em destaque) ===== */}
@@ -875,7 +888,7 @@ const AnalisePleitoPage: React.FC = () => {
             <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
               {Object.entries(pedido).map(([k, v]) => {
                 if (!v) return null;
-                if (k === "processoSei" || k === "processoSeiLinks") return null;
+                if (k === "processoSei" || k === "processoSeiLinks" || k === "notasTecnicas") return null;
                 return <Info key={k} label={mapHeader(k)} value={String(v)} />;
               })}
             </div>
@@ -894,16 +907,16 @@ const AnalisePleitoPage: React.FC = () => {
 
       {/* Formulário de análise */}
       <section className="rounded-xl border bg-white/70 p-4">
-        <h2 className="font-semibold text-gray-700">Análise técnica</h2>
+        <h2 className="font-semibold text-gray-700">Análise</h2>
 
         <div className="mt-3 grid grid-cols-1 gap-4">
-          <Field label="Resumo" placeholder="Escreva um resumo objetivo do pedido e do contexto..." value={form.resumo || ""} onChange={(v) => setForm((f) => ({ ...f, resumo: v }))} />
-          <Field label="Análise de comércio" placeholder="Aspectos de comércio exterior, impactos, etc..." value={form.comercio || ""} onChange={(v) => setForm((f) => ({ ...f, comercio: v }))} />
-          <Field label="Análise técnica" placeholder="Exame técnico do produto, norma, classificação etc..." value={form.tecnica || ""} onChange={(v) => setForm((f) => ({ ...f, tecnica: v }))} />
-          <Field label="Sugestão" placeholder="Encaminhamento sugerido..." value={form.sugestao || ""} onChange={(v) => setForm((f) => ({ ...f, sugestao: v }))} />
+          <Field label="Resumo" placeholder="Escreva um resumo objetivo do pedido e do contexto..." value={form.resumo || ""} onChange={(v) => setForm((f) => ({ ...f, resumo: v }))} readOnly={readOnly} />
+          <Field label="Análise de comércio" placeholder="Aspectos de comércio exterior, impactos, etc..." value={form.comercio || ""} onChange={(v) => setForm((f) => ({ ...f, comercio: v }))} readOnly={readOnly} />
+          <Field label="Análise técnica" placeholder="Coteje os argumentos do pleito (resumo) com os dados de comércio: confirme ou refute cada argumento à luz dos dados e conclua com a posição pelo deferimento ou indeferimento do pleito, justificando." value={form.tecnica || ""} onChange={(v) => setForm((f) => ({ ...f, tecnica: v }))} readOnly={readOnly} />
+          <Field label="Sugestão" placeholder="Encaminhamento sugerido..." value={form.sugestao || ""} onChange={(v) => setForm((f) => ({ ...f, sugestao: v }))} readOnly={readOnly} />
         </div>
 
-        <div className="mt-4 flex flex-wrap gap-2">
+        {!readOnly && <div className="mt-4 flex flex-wrap gap-2">
           <button className="px-4 py-2.5 rounded-xl border hover:bg-gray-50" disabled={salvando} onClick={() => salvar()}>
             Salvar rascunho
           </button>
@@ -913,7 +926,7 @@ const AnalisePleitoPage: React.FC = () => {
           <button className="px-4 py-2.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60" disabled={salvando} onClick={() => salvar("Concluído")}>
             Concluir
           </button>
-        </div>
+        </div>}
       </section>
 
       {/* Pós-deliberação */}
@@ -948,7 +961,7 @@ const AnalisePleitoPage: React.FC = () => {
           </div>
 
           <div className="md:col-span-2">
-            <button className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60" disabled={salvando} onClick={() => salvarPosDeliberacao()}>
+            <button className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-60" disabled={salvando || readOnly} onClick={() => salvarPosDeliberacao()}>
               Salvar encaminhamento
             </button>
           </div>
@@ -970,7 +983,7 @@ function Info(props: { label: string; value: string; className?: string }) {
   );
 }
 
-function Field(props: { label: string; placeholder?: string; value: string; onChange: (v: string) => void }) {
+function Field(props: { label: string; placeholder?: string; value: string; onChange: (v: string) => void; readOnly?: boolean }) {
   return (
     <div>
       <label className="text-sm text-gray-600">{props.label}</label>
@@ -979,6 +992,7 @@ function Field(props: { label: string; placeholder?: string; value: string; onCh
         rows={props.label.toLowerCase().includes("resumo") ? 4 : 6}
         placeholder={props.placeholder}
         value={props.value}
+        readOnly={props.readOnly}
         onChange={(e) => props.onChange(e.target.value)}
       />
     </div>
