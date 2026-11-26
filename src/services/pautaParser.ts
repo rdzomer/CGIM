@@ -103,6 +103,8 @@ export function parsePautaHtml(html: string): { secoes: SecaoPauta[]; stats: Sta
     if (rawHeaders.length === 0) continue;
     if (rawHeaders.filter(isHeaderLikely).length < 2) continue;
 
+    // a coluna de numeração às vezes vem sem título no SEI (seções 7.x): chama-a de "#"
+    if (!rawHeaders[0] && !rawHeaders.includes("#")) rawHeaders[0] = "#";
     const headers = dedupeHeaders(rawHeaders);
     const rows: Record<string, string>[] = [];
     for (const tr of trs.slice(1)) {

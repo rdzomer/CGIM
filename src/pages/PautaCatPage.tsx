@@ -516,7 +516,8 @@ const PautaCatPage: React.FC = () => {
         // antes da correção do parser podem ter linhas com colunas diferentes
         const headerSet: string[] = [...sec.headers];
         for (const r of sec.rows) for (const k of Object.keys(r)) if (!headerSet.includes(k) && !k.startsWith("__") && k !== "statusVigencia") headerSet.push(k);
-        const baseHeaders = headerSet.filter((h) => !!norm(h) && norm(h) !== "—");
+        // "Col_N" = coluna sem título no SEI (numeração do item); não é informação do pleito
+        const baseHeaders = headerSet.filter((h) => !!norm(h) && norm(h) !== "—" && !/^Col_\d+$/.test(h));
         const sanitizedHeaders = Array.from(new Set(baseHeaders));
         const headers = [...sanitizedHeaders, "Responsável"];
 
